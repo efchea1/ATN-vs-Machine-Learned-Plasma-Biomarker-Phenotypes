@@ -19,15 +19,18 @@ Author: Emmanuel Fle Chea, MPH
 
 The project compares:
 
-- Theory‑driven ATN classification `(Aβ42/40, p‑tau181, NfL)`
+<div align="center">
 
-- Data‑driven biomarker phenotypes derived from:
+  <h1><strong>ATN vs. Machine‑Learned Plasma Biomarker Phenotypes</strong></h1>
+  <h3><strong>Reproducible Analysis Pipeline for Comparing ATN Classification and Data‑Driven Clustering in a Population‑Based Cohort</strong></h3>
 
-+ k‑means clustering
+  <p>
+    <img src="https://img.shields.io/badge/Made%20with-R-276DC3.svg">
+    <img src="https://img.shields.io/badge/TensorFlow-2.x-orange.svg">
+    <img src="https://img.shields.io/badge/Data-HRS%202016-blue.svg">
+  </p>
 
-+ Gaussian mixture models (GMMs)
-
-+ Variational Autoencoder (VAE) latent structure
+</div>
 
 PCA for linear comparison
 
