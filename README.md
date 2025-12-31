@@ -85,7 +85,7 @@ This project evaluates how these approaches align or diverge.
 
 # 🚀 Getting Started
 
-### **1. Clone the Repository**
+### **Clone the Repository**
 ```bash
 git clone https://github.com/efchea1/ATN-vs-Machine-Learned-Plasma-Biomarker-Phenotypes.git
 cd ATN-vs-Machine-Learned-Plasma-Biomarker-Phenotypes
