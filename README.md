@@ -96,7 +96,8 @@ cd ATN-vs-Machine-Learned-Plasma-Biomarker-Phenotypes
 - RStudio (recommended)
 
 ### **3. Install Required R Packages**
-```install.packages(c(install.packages(c("aricode", "cluster", "corrplot", "cowplot", "DESeq2", "DiagrammeR",
+```
+install.packages(c(install.packages(c("aricode", "cluster", "corrplot", "cowplot", "DESeq2", "DiagrammeR",
                    "DiagrammeRsvg", "dplyr", "factoextra", "fpc", "ggdendro", "ggplot2",
                    "ggplotify", "GGally", "glue", "gridExtra", "haven", "keras", "lme4",
                    "lmerTest", "logistf", "mclust", "naniar", "NbClust", "nnet", "patchwork",
