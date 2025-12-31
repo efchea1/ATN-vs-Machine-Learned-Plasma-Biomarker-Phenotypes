@@ -1,25 +1,4 @@
 <div align="center">
-  <strong>ATN vs. Machine‑Learned Plasma Biomarker Phenotypes</strong><br>
-  <strong>Reproducible Analysis Pipeline for Comparing ATN Classification and Data‑Driven Clustering in a Population‑Based Cohort</strong>
-</div>
-
-<div align="center">
-
-  
-  
-  
-
-</div>
-
-# 📘 Overview
-This repository contains the complete reproducible analysis pipeline for the manuscript:
-
-ATN Classification and Machine‑Learned Plasma Biomarker Phenotypes Reveal Distinct Alzheimer’s Pathology in a Population‑Based Cohort  
-Author: Emmanuel Fle Chea, MPH
-
-The project compares:
-
-<div align="center">
 
   <h1><strong>ATN vs. Machine‑Learned Plasma Biomarker Phenotypes</strong></h1>
   <h3><strong>Reproducible Analysis Pipeline for Comparing ATN Classification and Data‑Driven Clustering in a Population‑Based Cohort</strong></h3>
@@ -31,6 +10,14 @@ The project compares:
   </p>
 
 </div>
+
+# 📘 Overview
+This repository contains the complete reproducible analysis pipeline for the manuscript:
+
+ATN Classification and Machine‑Learned Plasma Biomarker Phenotypes Reveal Distinct Alzheimer’s Pathology in a Population‑Based Cohort  
+Author: Emmanuel Fle Chea, MPH
+
+The project compares:
 
 PCA for linear comparison
 
