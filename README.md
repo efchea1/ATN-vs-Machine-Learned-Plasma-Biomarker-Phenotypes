@@ -85,17 +85,17 @@ This project evaluates how these approaches align or diverge.
 
 # 🚀 Getting Started
 
-### **Clone the Repository**
+### **1. Clone the Repository**
 ```bash
 git clone https://github.com/efchea1/ATN-vs-Machine-Learned-Plasma-Biomarker-Phenotypes.git
 cd ATN-vs-Machine-Learned-Plasma-Biomarker-Phenotypes
 ```
 
-# Install R and RStudio
+### **2. Install R and RStudio**
 - R ≥ 4.3.0
 - RStudio (recommended)
 
-# Install Required R Packages
+### **3. Install Required R Packages**
 ```install.packages(c(install.packages(c("aricode", "cluster", "corrplot", "cowplot", "DESeq2", "DiagrammeR",
                    "DiagrammeRsvg", "dplyr", "factoextra", "fpc", "ggdendro", "ggplot2",
                    "ggplotify", "GGally", "glue", "gridExtra", "haven", "keras", "lme4",
@@ -105,6 +105,7 @@ cd ATN-vs-Machine-Learned-Plasma-Biomarker-Phenotypes
                    "tensorflow", "tidyr", "tidyverse", "umap", "viridis"))
 ))
 ```
+---
 
 # 📁 Data Requirements
 HRS data **cannot be redistributed**.
