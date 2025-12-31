@@ -106,3 +106,28 @@ cd ATN-vs-Machine-Learned-Plasma-Biomarker-Phenotypes
 ))
 ```
 
+# 📁 Data Requirements
+HRS data **cannot be redistributed**.
+
+To reproduce the analysis:
+1. Register at: https://hrs.isr.umich.edu
+2. Request access to the **2016 Venous Blood Study** biomarker files
+3. Download the required datasets (SAS format)
+4. Place them in your local working directory
+5. The analysis pipeline (`.Rmd`) includes all necessary code for loading and preprocessing the HRS datasets once they are downloaded.
+
+# 📜 Citation
+If you use this code, please cite:
+
+Chea, E.F.  
+ATN Classification and Machine-Learned Plasma Biomarker Phenotypes Reveal Distinct Alzheimer's Pathology in a Population-Based Cohort.  
+Journal of Alzheimer’s Disease. (In review / forthcoming)
+
+# 👤 Author
+**Emmanuel Fle Chea, MPH**  
+Independent Researcher • Data Scientist • Biomedical Researcher  
+📧 **Email:** emmanuelf.chea@gmail.com
+
+# 📄 License
+This project is released under the MIT License, see License file.
+You are free to reuse, modify, and build upon this work with attribution.
