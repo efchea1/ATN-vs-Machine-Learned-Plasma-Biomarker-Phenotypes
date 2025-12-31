@@ -129,5 +129,6 @@ Independent Researcher • Data Scientist • Biomedical Researcher
 📧 **Email:** emmanuelf.chea@gmail.com
 
 # 📄 License
-This project is released under the MIT License, see License file.
+This project is released under the **MIT License**.  
+See the **LICENSE** file for full terms.  
 You are free to reuse, modify, and build upon this work with attribution.
