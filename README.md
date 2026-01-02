@@ -13,6 +13,19 @@
 
 ---
 
+# Repository Structure
+
+| **Folder & File** | **Description** |
+|---------------|-------------|
+| **Code** | Full R Markdown pipeline (`ATN_Machine_Learned_Plasma_Biomarker_Phenotypes.Rmd`) documenting the entire workflow |
+| **Figures** | All exported plots and graphs |
+| **Results** | Saved models, latent spaces, training histories, serialized analysis objects, etc. |
+| **Tables** | CSV outputs for all tables |
+| **Data** | *(Empty)* - users must obtain HRS data through the official portal; raw HRS data are not included |
+| **License** | MIT License |
+
+---
+
 # 📘 Overview
 
 This repository contains the complete reproducible analysis pipeline for the manuscript:
