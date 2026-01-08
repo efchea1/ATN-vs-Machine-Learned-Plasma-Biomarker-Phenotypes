@@ -1,0 +1,5 @@
+"Metric","k3_value","k4_value","Decision_Criterion"
+"Mean Silhouette",0.528,0.474,"Higher is better"
+"Smallest Cluster N",14,14,"Stability concern if <30"
+"Smallest Cluster %",0.3,0.3,"Stability concern if <1%"
+"ARI with k=4",NA,0.812,"Agreement measure"
