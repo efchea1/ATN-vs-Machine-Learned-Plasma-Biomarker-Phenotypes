@@ -1,4 +1,0 @@
-"Biomarker","Primary_Cutoff","Alternative_Range","Estimated_Reclassification_Pct","Common_Transitions"
-"Aβ42/40 ratio","< 0.067","0.060 – 0.074",42.1,"A+ ↔ A- (borderline cases)"
-"p-Tau181","> 2.2 pg/mL","2.0 – 2.4 pg/mL",9,"T+ ↔ T- (intermediate pathology)"
-"NfL","> 20 pg/mL","18 – 22 pg/mL",10.6,"N+ ↔ N- (mild neurodegeneration)"
