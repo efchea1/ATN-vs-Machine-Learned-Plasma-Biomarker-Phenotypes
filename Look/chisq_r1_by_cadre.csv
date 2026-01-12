@@ -1,0 +1,17 @@
+Var1,Var2,Freq
+0,Doctor,11
+1,Doctor,3
+0,Midwife,13
+1,Midwife,2
+0,Nurse,61
+1,Nurse,15
+0,Other,8
+1,Other,0
+0,PA,18
+1,PA,3
+0,Pharmacist,9
+1,Pharmacist,2
+0,PharmTech,17
+1,PharmTech,3
+0,Specialist,4
+1,Specialist,1
