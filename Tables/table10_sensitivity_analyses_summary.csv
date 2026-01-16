@@ -1,8 +1,0 @@
-"Analysis","Finding","Interpretation"
-"GFAP-Excluded Clustering","ARI = 0.187 (3-bio) vs 0.119 (4-bio); +57% improvement","GFAP contributes ~1/3 discordance; binary vs continuous = 2/3"
-"k=3 vs k=4 Comparison","Silhouette: k=3 = 0.547, k=4 = 0.474; k=4 preserves extremes","k=4 provides superior biological resolution"
-"Cluster 4 Stability","Jaccard = 0.779; Manhattan ARI = 0.946","Cluster 4 is stable, not artifact"
-"Distance Metric Sensitivity","ARI = 0.946 (Manhattan vs Euclidean)","Results robust to distance metric"
-"Alternative ATN Cutoffs","15-20% reclassification under ±10% threshold variation","ATN moderately sensitive to cutoffs"
-"Missing Data Assessment","99.1% complete cases","Minimal bias from missingness"
-"VAE Latent Dimensions","2D optimal (validation loss = 1.548)","Parsimonious representation optimal"
