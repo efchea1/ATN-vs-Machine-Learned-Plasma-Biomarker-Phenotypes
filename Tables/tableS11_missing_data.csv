@@ -1,0 +1,13 @@
+"Variable","N_Missing","Pct_Missing","Pattern"
+"NfL",2,0,"Complete"
+"GFAP",2,0,"Complete"
+"Aβ42/40 ratio",3,0.1,"Complete"
+"pTau181",35,0.8,"Complete"
+"Age",0,0,"MCAR"
+"Gender",0,0,"MCAR"
+"Race/Ethnicity",0,0,"MCAR"
+"Education",0,0,"MCAR"
+"APOE ε4",NA,NA,NA
+"Cognition 2016",0,0,"MCAR"
+"Cognition 2018",603,13.5,"MCAR"
+"Cognition 2020",941,21.1,"MCAR"

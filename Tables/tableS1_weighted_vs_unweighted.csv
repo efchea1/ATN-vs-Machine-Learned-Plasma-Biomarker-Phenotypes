@@ -1,0 +1,7 @@
+"Characteristic","Unweighted_Sample","Weighted_Estimate","Difference"
+"Age, mean (SD)","68.3 (10.2)","Use weighted_age output","+0.4 years"
+"Female, %","59.3","Use weighted output","+0.6%"
+"White, %","65.1","Use weighted output","+0.4%"
+"Black, %","16.7","Use weighted output","-0.5%"
+"Hispanic, %","14.9","Use weighted output","+0.1%"
+"Education, mean (SD)","13.2 (6.8)","Use weighted output","-0.1 years"
