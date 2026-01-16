@@ -1,2 +1,0 @@
-"Analysis","ARI_4bio_vs_ATN","ARI_3bio_vs_ATN","Relative_Improvement_Pct","ARI_with_vs_without","Silhouette_with_GFAP","Silhouette_without_GFAP","N_with_GFAP","N_without_GFAP","Interpretation"
-"GFAP Inclusion Sensitivity",0.119,0.03,-74.5,0.313,0.474,0.662,4427,4427,"GFAP contributes ~69% of discordance"
