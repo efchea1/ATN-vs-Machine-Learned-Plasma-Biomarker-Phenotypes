@@ -133,7 +133,6 @@ If you use this code, please cite:
 
 Chea, E.F.  
 ATN Classification and Machine-Learned Plasma Biomarker Phenotypes Reveal Distinct Alzheimer's Pathology in a Population-Based Cohort.  
-Journal of Alzheimer’s Disease. (In review / forthcoming)
 
 Preprint **DOI:** https://doi.org/10.64898/2026.01.02.26343331
 
