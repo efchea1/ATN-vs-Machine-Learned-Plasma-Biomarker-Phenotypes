@@ -49,10 +49,7 @@ The project compares:
 
 Using **4,465 participants** from the **Health and Retirement Study (HRS) 2016 Venous Blood Study**, this pipeline evaluates:
 
-- concordance between ATN and clustering  
-- biological interpretability  
-- cluster stability  
-- cognitive associations over 4 years  
+- concordance between ATN and machine learning frameworks    
 
 This repository is designed for **transparency**, **reproducibility**, and **open scientific practice**.
 
@@ -137,6 +134,10 @@ If you use this code, please cite:
 Chea, E.F.  
 ATN Classification and Machine-Learned Plasma Biomarker Phenotypes Reveal Distinct Alzheimer's Pathology in a Population-Based Cohort.  
 Journal of Alzheimer’s Disease. (In review / forthcoming)
+
+Preprint **DOI:** https://doi.org/10.64898/2026.01.02.26343331
+
+**Peer-review journal publication:** *In-progress*
 
 # 👤 Author
 **Emmanuel Fle Chea, MPH**  
