@@ -82,17 +82,6 @@ This project evaluates how these approaches align or diverge.
 
 ---
 
-# 📊 Key Findings (from the manuscript)
-
-- ATN and clustering show **modest concordance** (ARI = 0.119, NMI = 0.113).  
-- Removing GFAP increases concordance by **57%**, showing its orthogonal biology.  
-- **k = 4** clusters provide the best biological resolution.  
-- A rare **non‑AD neurodegeneration cluster** (0.3%) is small but highly stable.  
-- PCA captures **global structure**; VAE captures **localized nonlinear trajectories**.  
-- Both ATN and clusters predict **4‑year cognitive decline** (R² ≈ 0.02).  
-
----
-
 # 🚀 Getting Started
 
 ### **1. Clone the Repository**
