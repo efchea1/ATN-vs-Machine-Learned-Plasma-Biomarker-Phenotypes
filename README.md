@@ -7,7 +7,7 @@
     <img src="https://img.shields.io/badge/Made%20with-R-276DC3.svg">
     <img src="https://img.shields.io/badge/TensorFlow-2.x-orange.svg">
     <img src="https://img.shields.io/badge/Data-HRS%202016-blue.svg">
-    <img src="https://img.shields.io/badge/Open%20Science-Reproducible-orange.svg">
+    <img src="https://img.shields.io/badge/Open%20Science-Reproducible-green.svg">
   </p>
 
 </div>
