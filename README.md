@@ -31,8 +31,8 @@
 
 This repository contains the complete reproducible analysis pipeline for the manuscript:
 
-**ATN Classification and Machine‑Learned Plasma Biomarker Phenotypes Reveal Distinct Alzheimer’s Pathology in a Population‑Based Cohort**  
-*Author: Emmanuel Fle Chea, MPH*
+***ATN Classification and Machine‑Learned Plasma Biomarker Phenotypes Reveal Distinct Alzheimer’s Pathology in a Population‑Based Cohort***  
+**Author:** Emmanuel Fle Chea, MPH
 
 The project compares:
 
