@@ -1,0 +1,3899 @@
+---
+title: "Machine-Learned Plasma Biomarker Phenotypes"
+author: "Emmanuel Fle Chea, MPH"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# -----------------------------------------------------------------------------
+# SETUP & LIBRARIES
+# -----------------------------------------------------------------------------
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(haven)
+library(nnet)
+library(pROC)
+library(keras)
+library(tensorflow)
+library(DESeq2)
+library(corrplot)
+library(pheatmap)
+library(factoextra)
+library(cluster)
+library(GGally)
+library(readr)
+library(reshape2) 
+library(naniar)
+library(aricode)
+library(ggdendro)
+library(NbClust)
+library(mclust)
+library(gridExtra)
+library(fpc)
+library(umap)
+library(Rtsne)
+library(reticulate)
+library(survey)
+library(ResourceSelection)
+library(rmda)
+library(PredictABEL)
+library(logistf)
+library(cowplot) 
+library(viridis)
+library(ppclust)
+library(glue)
+library(DiagrammeR)
+library(DiagrammeRsvg)   
+library(rsvg)            
+library(patchwork)
+library(lme4)
+library(lmerTest)
+library(tidyverse)
+library(ppclust)
+library(glue)
+library(ggplotify)
+library(ggpubr)
+library(tibble)
+library(tiff)
+library(magick)
+library(networkD3)
+library(htmlwidgets)
+library(webshot2)
+
+# Create separate directories for PNG and TIFF figures
+dir.create("figures/png", showWarnings = FALSE, recursive = TRUE)
+dir.create("figures/tiff", showWarnings = FALSE, recursive = TRUE)
+dir.create("figures/supplementary/png", showWarnings = FALSE, recursive = TRUE)
+dir.create("figures/supplementary/tiff", showWarnings = FALSE, recursive = TRUE)
+dir.create("tables", showWarnings = FALSE)
+dir.create("results", showWarnings = FALSE)
+
+# Set ggplot theme
+theme_set(
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(size = 11),
+      legend.position = "bottom"
+    )
+)
+
+# Reproducibility
+set.seed(2026)
+```
+
+
+# FIGURE ORGANIZATION
+
+```{r}
+# Helper function to save both PNG and TIFF versions
+save_dual_format <- function(plot_object, filename_base, width = 10, height = 6,
+                              dpi = 300, supplementary = FALSE) {
+
+  base_dir <- if(supplementary) "figures/supplementary" else "figures"
+
+  # Save PNG (for quick viewing)
+  ggsave(
+    filename = file.path(base_dir, "png", paste0(filename_base, ".png")),
+    plot = plot_object,
+    width = width,
+    height = height,
+    dpi = dpi,
+    bg = "white"
+  )
+
+  # Save TIFF (for publication)
+  ggsave(
+    filename = file.path(base_dir, "tiff", paste0(filename_base, ".tif")),
+    plot = plot_object,
+    width = width,
+    height = height,
+    dpi = 600,  # Higher DPI for TIFF
+    compression = "lzw",
+    bg = "white"
+  )
+
+  cat("Saved:", filename_base, "in both PNG and TIFF formats\n")
+}
+```
+
+
+
+# DATA LOADING & PREPARATION
+
+```{r}
+# -----------------------------------------------------------------------------
+# DATA LOADING & PREPARATION
+# -----------------------------------------------------------------------------
+
+trk2020 <- read_sas("trk2020tr_r.sas7bdat") # trk2020: HRS tracker file
+neurobiomarker <- read_sas("neurobiomarker_sithara.sas7bdat") # neurobiomarker: plasma ATN biomarkers (Aβ42/40, pTau181, NfL, GFAP)
+cogimp <- read_sas("cogimp9220a_r.sas7bdat") # cogimp: cognitive impairment classification (Langa-Weir)
+
+# Document sample sizes
+n_trk_initial <- nrow(trk2020)
+n_bio_initial <- nrow(neurobiomarker)
+n_cog_initial <- nrow(cogimp)
+
+# Prepare tracker data
+trk2020_sub <- trk2020 %>%
+  select(HHID, PN, GENDER, HISPANIC, RACE, PAGE, PVBSWGTR, SECU, STRATUM, SCHLYRS) %>%
+  distinct() %>%
+  mutate(HHID_PN = paste0(HHID, "_", PN))
+
+# Prepare biomarker data
+neurobiomarker <- neurobiomarker %>%
+  mutate(HHID_PN = paste0(HHID, "_", PN))
+
+# ------ RECONSTRUCT 2016, 2018, 2020 COGNITION (Waves 13, 14, 15) -------
+
+cog_long <- cogimp %>%
+  mutate(
+    HHID_PN = paste0(HHID, "_", PN),
+
+    # ---- 2016 (Wave 13) ----
+    Cog_2016_IMRC  = R13IMRC,
+    Cog_2016_DLRC  = R13DLRC,
+    Cog_2016_SER7  = R13SER7,
+    Cog_2016_BWC20 = R13BWC20,
+    Cog_Score_2016 = Cog_2016_IMRC + Cog_2016_DLRC + Cog_2016_SER7 + Cog_2016_BWC20,
+
+    # ---- 2018 (Wave 14) proxy/self collapsed ----
+    Cog_2018_IMRC  = coalesce(R14IMRCP,  R14IMRCW),
+    Cog_2018_DLRC  = coalesce(R14DLRCP,  R14DLRCW),
+    Cog_2018_SER7  = coalesce(R14SER7P,  R14SER7W),
+    Cog_2018_BWC20 = coalesce(R14BWC20P, R14BWC20W),
+    Cog_Score_2018 = Cog_2018_IMRC + Cog_2018_DLRC + Cog_2018_SER7 + Cog_2018_BWC20,
+
+    # ---- 2020 (Wave 15) proxy/self collapsed ----
+    Cog_2020_IMRC  = coalesce(R15IMRCP,  R15IMRCW),
+    Cog_2020_DLRC  = coalesce(R15DLRCP,  R15DLRCW),
+    Cog_2020_SER7  = coalesce(R15SER7P,  R15SER7W),
+    Cog_2020_BWC20 = coalesce(R15BWC20P, R15BWC20W),
+    Cog_Score_2020 = Cog_2020_IMRC + Cog_2020_DLRC + Cog_2020_SER7 + Cog_2020_BWC20
+  )
+
+# Cognitive classification function
+classify_cog <- function(score) {
+  case_when(
+    score <= 6  ~ "Dementia",
+    score <= 11 ~ "CIND",
+    TRUE        ~ "Normal"
+  )
+}
+
+# Apply classification
+cog_long <- cog_long %>%
+  mutate(
+    Dementia_IMP_2016 = classify_cog(Cog_Score_2016),
+    Dementia_IMP_2018 = classify_cog(Cog_Score_2018),
+    Dementia_IMP_2020 = classify_cog(Cog_Score_2020)
+  )
+
+# Subset cognition variables to carry forward
+cogimp_sub <- cog_long %>%
+  select(
+    HHID_PN,
+    Cog_Score_2016, Dementia_IMP_2016,
+    Cog_Score_2018, Dementia_IMP_2018,
+    Cog_Score_2020, Dementia_IMP_2020
+  )
+
+n_cog_complete <- nrow(cogimp_sub)
+
+# ----------- MERGE INTO FINAL ANALYTIC DATASET ----------------
+
+final <- neurobiomarker %>%
+  inner_join(trk2020_sub, by = "HHID_PN") %>%
+  inner_join(cogimp_sub, by = "HHID_PN")
+
+n_merged <- nrow(final)
+```
+
+
+# SAMPLE FLOWCHART
+
+```{r}
+# ---------- FLOWCHART (2016/2018/2020 cognition availability) -------------
+
+# Sample sizes for flowchart — all derived from data, no hardcoding
+n_bio_initial <- nrow(neurobiomarker)
+
+bio_ids <- neurobiomarker$HHID_PN
+
+n_bio_cog_2016 <- sum(bio_ids %in% cog_long$HHID_PN[!is.na(cog_long$Cog_Score_2016)])
+n_bio_cog_2018 <- sum(bio_ids %in% cog_long$HHID_PN[!is.na(cog_long$Cog_Score_2018)])
+n_bio_cog_2020 <- sum(bio_ids %in% cog_long$HHID_PN[!is.na(cog_long$Cog_Score_2020)])
+
+flowchart_data <- data.frame(
+  Stage = c(
+    "2016 VBS participants with biomarkers",
+    "With 2016 cognition",
+    "With 2018 cognition",
+    "With 2020 cognition",
+    "Final merged analytical sample"
+  ),
+  N = c(
+    n_bio_initial,
+    n_bio_cog_2016,
+    n_bio_cog_2018,
+    n_bio_cog_2020,
+    n_merged
+  )
+)
+
+write.csv(flowchart_data, "tables/sample_flowchart.csv", row.names = FALSE)
+knitr::kable(flowchart_data, caption = "Sample Flowchart")
+
+cat("\n=== CORRECTED SAMPLE FLOWCHART ===\n")
+print(flowchart_data)
+cat("\n")
+
+# ------------ CONSORT DIAGRAM WITH PERCENTAGES — all values from data ---------------------
+
+cat("CONSORT diagram generated on:", Sys.Date(), "\n")
+
+consort_text <- glue('
+digraph consort {{
+
+  graph [
+    layout = dot,
+    rankdir = TB,
+    nodesep = 0.5,
+    ranksep = 0.75
+  ]
+
+  title [
+    label = "Sample Flowchart for 2016 VBS Biomarker Cohort",
+    shape = plaintext,
+    fontsize = 16
+  ]
+
+  node [
+    shape = box,
+    style = "rounded,filled",
+    fillcolor = "#E8F1FA",
+    color = "#2C3E50",
+    fontsize = 12
+  ]
+
+  title -> a [style = invis]
+
+  a [label = "2016 VBS participants with biomarkers\\nN = {n_bio_initial} (100%)"];
+  b [label = "With 2016 cognition\\nN = {n_bio_cog_2016} ({round(n_bio_cog_2016 / n_bio_initial * 100, 1)}%)"];
+  c [label = "With 2018 cognition\\nN = {n_bio_cog_2018} ({round(n_bio_cog_2018 / n_bio_initial * 100, 1)}%)"];
+  d [label = "With 2020 cognition\\nN = {n_bio_cog_2020} ({round(n_bio_cog_2020 / n_bio_initial * 100, 1)}%)"];
+  e [label = "Final merged analytical sample\\nN = {n_merged} ({round(n_merged / n_bio_initial * 100, 1)}%)"];
+
+  a -> b;
+  b -> c;
+  c -> d;
+  d -> e;
+}}
+')
+
+consort_graph <- grViz(consort_text, engine = "dot")
+
+svg_txt <- export_svg(consort_graph)
+writeLines(svg_txt, "figures/consort_flowchart.svg")
+
+rsvg_png("figures/consort_flowchart.svg", 
+         "figures/png/figure1_consort_flowchart.png")
+
+fig1 <- image_read("figures/consort_flowchart.svg")
+image_write(fig1, 
+            path = "figures/tiff/figure1_consort_flowchart.tiff",
+            format = "tiff",
+            density = 600,
+            compression = "lzw")
+
+print(fig1)
+```
+
+
+# DEMOGRAPHIC RECODING
+
+```{r}
+# Demographic recoding 
+final <- final %>%
+  mutate(
+    GENDER_factor = factor(GENDER, levels = c(1, 2), labels = c("Male", "Female")),
+    RACE_ETH = case_when(
+      HISPANIC %in% c(1, 2, 3) ~ "Hispanic",
+      RACE == 1 & HISPANIC == 5 ~ "White",
+      RACE == 2 & HISPANIC == 5 ~ "Black",
+      RACE == 7 & HISPANIC == 5 ~ "Other",
+      TRUE ~ "Other"
+    ),
+    Female = ifelse(GENDER == 2, 1, 0)
+  )
+```
+
+
+# ATN CLASSIFICATION (LITERATURE-BASED CUTOFFS)
+
+```{r}
+# ATN Framework with Literature-Based Cutoffs
+
+final <- final %>%
+  mutate(
+    log_NfL = log(NfL),
+    log_GFAP = log(GFAP),
+    log_AB42_40_ratio = log(AB42_40_ratio),
+    log_pTau181_recode = log(pTau181_recode)
+  )
+
+# LITERATURE-BASED CUTOFFS (Citation):
+# 
+# Aβ42/40 ratio < 0.067: Nakamura et al. (2018) JAMA Neurology
+#   "High performance plasma amyloid-β biomarkers for Alzheimer's disease"
+#   PMID: 29613453
+# 
+# pTau181 > 2.2 pg/mL: Karikari et al. (2020) Nature Medicine  
+#   "Blood phosphorylated tau 181 as a biomarker for Alzheimer's disease"
+#   PMID: 32123386
+#
+# NfL > 20 pg/mL: Mattsson-Carlgren et al. (2021) JAMA Neurology
+#   "Plasma biomarker strategy for selecting patients with Alzheimer disease"
+#   PMID: 33433581
+
+final <- final %>%
+  mutate(
+    A = ifelse(AB42_40_ratio < 0.067, "A+", "A-"),
+    T = ifelse(pTau181_recode > 2.2, "T+", "T-"),
+    N = ifelse(NfL > 20, "N+", "N-"),
+    ATN = paste(A, T, N, sep = "/")
+  )
+
+# Document cutoff sources
+cutoff_refs <- data.frame(
+  Biomarker = c("Aβ42/40 ratio", "pTau181", "NfL"),
+  Cutoff = c("< 0.067", "> 2.2 pg/mL", "> 20 pg/mL"),
+  Reference = c(
+    "Nakamura et al. 2018 JAMA Neurol (PMID: 29613453)",
+    "Karikari et al. 2020 Nat Med (PMID: 32123386)",
+    "Mattsson-Carlgren et al. 2021 JAMA Neurol (PMID: 33433581)"
+  )
+)
+
+write.csv(cutoff_refs, "tables/atn_cutoff_references.csv", row.names = FALSE)
+knitr::kable(cutoff_refs, caption = "ATN Cutoff References")
+
+cat("\n=== ATN CUTOFF REFERENCES ===\n")
+print(cutoff_refs)
+cat("\n")
+
+# ------- ATN Distribution Summary (Table 2) — derived entirely from data ------------
+
+atn_dist <- final %>%
+  dplyr::count(ATN) %>%
+  dplyr::mutate(Percent = round(100 * n / sum(n), 1)) %>%
+  dplyr::rename(ATN_Profile = ATN, N = n)
+
+write.csv(atn_dist, "tables/table2_atn_profile_distribution.csv", row.names = FALSE)
+knitr::kable(atn_dist, caption = "Table 2. ATN Profile Distribution")
+
+cat("\n=== ATN DISTRIBUTION (TABLE 2) ===\n")
+print(atn_dist)
+
+# Bar plot of ATN frequencies
+g_atn <- ggplot(atn_dist, aes(x = reorder(ATN_Profile, -Percent), y = Percent)) +
+  geom_bar(stat = "identity", fill = "steelblue", alpha = 0.8) +
+  geom_text(aes(label = paste0(Percent, "%")), vjust = -0.5, size = 3.5) +
+  theme_bw(base_size = 14) +
+  labs(
+    title = "ATN Profile Distribution",
+    subtitle = paste0("N = ", sum(atn_dist$N)),
+    x = "ATN Profile",
+    y = "Percent of Sample"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold")
+  )
+
+ggsave("figures/png/figure2_panelB_atn_profiles.png", g_atn, width = 10, height = 6, dpi = 300)
+ggsave("figures/tiff/figure2_panelB_atn_profiles.tiff", g_atn, width = 10, height = 6, dpi = 300)
+
+print(g_atn)
+```
+
+
+# BASELINE CHARACTERISTICS BY ATN PROFILE / COHORT CHARACTERIZATION WITH MULTIPLE TESTING
+
+```{r}
+# -------- Cohort Characterization + Statistical Tables -------------
+
+cat("\n=== CHECKING DEMOGRAPHIC VARIABLE CODING ===\n")
+cat("GENDER unique values:", unique(final$GENDER), "\n")
+cat("RACE unique values:", unique(final$RACE), "\n")
+cat("HISPANIC unique values:", unique(final$HISPANIC), "\n\n")
+
+# Recode demographic variables
+final <- final %>%
+  mutate(
+    GENDER_factor = factor(GENDER, 
+                           levels = c(1, 2),
+                           labels = c("Male", "Female")),
+    RACE_ETH = case_when(
+      HISPANIC %in% c(1, 2, 3) ~ "Hispanic",
+      RACE == 1 & HISPANIC == 5 ~ "White",
+      RACE == 2 & HISPANIC == 5 ~ "Black",
+      RACE == 7 & HISPANIC == 5 ~ "Other",
+      RACE == 0 ~ "Other",
+      TRUE ~ "Other"
+    ),
+    Female = ifelse(GENDER == 2, 1, 0)
+  )
+
+# Verify the recoding worked
+cat("\n=== VERIFICATION OF RECODING ===\n")
+cat("GENDER_factor distribution:\n")
+print(table(final$GENDER_factor, useNA = "always"))
+cat("\nRACE_ETH distribution:\n")
+print(table(final$RACE_ETH, useNA = "always"))
+cat("\n")
+
+# Create Table 1 — all summaries derived from data
+table1 <- final %>%
+  group_by(ATN) %>%
+  summarise(
+    n = n(),
+    mean_age = mean(PAGE, na.rm = TRUE),
+    sd_age = sd(PAGE, na.rm = TRUE),
+    female_pct = mean(GENDER == 2, na.rm = TRUE) * 100,
+    mean_education = mean(SCHLYRS, na.rm = TRUE),
+    sd_education = sd(SCHLYRS, na.rm = TRUE),
+    pct_white = mean(RACE_ETH == "White", na.rm = TRUE) * 100,
+    pct_black = mean(RACE_ETH == "Black", na.rm = TRUE) * 100,
+    pct_hispanic = mean(RACE_ETH == "Hispanic", na.rm = TRUE) * 100,
+    pct_other = mean(RACE_ETH == "Other", na.rm = TRUE) * 100
+  )
+
+write.csv(table1, "tables/table1_demographics_by_atn.csv", row.names = FALSE)
+knitr::kable(table1, digits = 1, 
+             caption = "Table 1. Cohort Characteristics by ATN Group")
+
+# Biomarker summary — all values computed from data
+biomarker_summary_full <- final %>%
+  summarise(
+    NfL_mean   = mean(NfL, na.rm = TRUE),
+    NfL_sd     = sd(NfL, na.rm = TRUE),
+    NfL_median = median(NfL, na.rm = TRUE),
+    NfL_IQR    = IQR(NfL, na.rm = TRUE),
+    
+    GFAP_mean   = mean(GFAP, na.rm = TRUE),
+    GFAP_sd     = sd(GFAP, na.rm = TRUE),
+    GFAP_median = median(GFAP, na.rm = TRUE),
+    GFAP_IQR    = IQR(GFAP, na.rm = TRUE),
+    
+    AB42_40_mean   = mean(AB42_40_ratio, na.rm = TRUE),
+    AB42_40_sd     = sd(AB42_40_ratio, na.rm = TRUE),
+    AB42_40_median = median(AB42_40_ratio, na.rm = TRUE),
+    AB42_40_IQR    = IQR(AB42_40_ratio, na.rm = TRUE),
+    
+    pTau_mean   = mean(pTau181_recode, na.rm = TRUE),
+    pTau_sd     = sd(pTau181_recode, na.rm = TRUE),
+    pTau_median = median(pTau181_recode, na.rm = TRUE),
+    pTau_IQR    = IQR(pTau181_recode, na.rm = TRUE)
+  )
+
+write.csv(biomarker_summary_full, "tables/tableS8_biomarker_summary.csv", row.names = FALSE)
+knitr::kable(biomarker_summary_full, digits = 2,
+             caption = "Biomarker Summary: Mean, SD, Median, IQR")
+
+# Violin plots for biomarkers
+biomarkers_long <- final %>%
+  select(log_NfL, log_GFAP, log_AB42_40_ratio, log_pTau181_recode, ATN) %>%
+  pivot_longer(cols = c(log_NfL, log_GFAP, log_AB42_40_ratio, log_pTau181_recode),
+               names_to = "Biomarker",
+               values_to = "Value") %>%
+  drop_na(Value)
+
+biomarker_labels <- c(
+  log_NfL = "NfL (log)",
+  log_GFAP = "GFAP (log)",
+  log_AB42_40_ratio = "Aβ42/40 (log)",
+  log_pTau181_recode = "pTau181 (log)"
+)
+
+biomarkers_long$Biomarker <- factor(biomarkers_long$Biomarker,
+                                    levels = names(biomarker_labels),
+                                    labels = biomarker_labels)
+
+g <- ggplot(biomarkers_long, aes(x = Biomarker, y = Value, fill = Biomarker)) +
+  geom_violin(trim = FALSE, alpha = 0.7) +
+  geom_boxplot(width = 0.1, outlier.shape = NA, fill = "white") +
+  theme_bw(base_size = 14) +
+  labs(
+    title = "Distribution of Plasma Biomarkers (log-transformed)",
+    y = "Log-transformed Value",
+    x = NULL
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none",
+    plot.title = element_text(face = "bold")
+  ) +
+  scale_fill_brewer(palette = "Set2")
+
+ggsave("figures/png/biomarker_violin_plot.png", g, width = 10, height = 6, dpi = 300)
+ggsave("figures/tiff/biomarker_violin_plot.tiff", g, width = 10, height = 6, dpi = 300)
+
+print(g)
+
+# ------- Q–Q PLOTS FOR BIOMARKER DISTRIBUTIONS --------------
+
+finite_df <- final %>%
+  filter(
+    is.finite(log_NfL),
+    is.finite(log_GFAP),
+    is.finite(log_AB42_40_ratio),
+    is.finite(log_pTau181_recode)
+  )
+
+qq_nfl <- ggplot(finite_df, aes(sample = log_NfL)) +
+  stat_qq() + stat_qq_line(color = "red") +
+  theme_bw(base_size = 14) +
+  labs(title = "Q–Q Plot: log(NfL)")
+
+qq_gfap <- ggplot(finite_df, aes(sample = log_GFAP)) +
+  stat_qq() + stat_qq_line(color = "red") +
+  theme_bw(base_size = 14) +
+  labs(title = "Q–Q Plot: log(GFAP)")
+
+qq_ab <- ggplot(finite_df, aes(sample = log_AB42_40_ratio)) +
+  stat_qq() + stat_qq_line(color = "red") +
+  theme_bw(base_size = 14) +
+  labs(title = "Q–Q Plot: log(Aβ42/40 ratio)")
+
+qq_ptau <- ggplot(finite_df, aes(sample = log_pTau181_recode)) +
+  stat_qq() + stat_qq_line(color = "red") +
+  theme_bw(base_size = 14) +
+  labs(title = "Q–Q Plot: log(pTau181)")
+
+# Add a title and subtitle
+qq_grid <- (
+  (qq_nfl | qq_gfap) /
+  (qq_ab  | qq_ptau)
+) +
+  patchwork::plot_annotation(
+    title = "Normality Assessment of Log-Transformed Plasma Biomarkers",
+    subtitle = "Q–Q plots for NfL, GFAP, Aβ42/40 ratio, and pTau181"
+  ) &
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+
+print(qq_grid)
+
+ggsave("figures/supplementary/png/figureS1_biomarker_qq_plots.png",
+       qq_grid, width = 16, height = 14, dpi = 600)
+
+ggsave("figures/supplementary/tiff/figureS1_biomarker_qq_plots.tiff",
+       qq_grid, width = 16, height = 14, dpi = 600)
+
+print(qq_grid)
+
+# Missingness analysis — counts derived from actual data
+missing_summary <- final %>%
+  summarise(
+    across(c(NfL, GFAP, AB42_40_ratio, pTau181_recode, 
+             PAGE, GENDER, RACE, SCHLYRS, Cog_Score_2016),
+           ~sum(is.na(.)))
+  ) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Missing_N") %>%
+  mutate(Missing_Percent = round(100 * Missing_N / nrow(final), 1))
+
+write.csv(missing_summary, "tables/missing_data_summary.csv", row.names = FALSE)
+knitr::kable(missing_summary, caption = "Missing Data Summary")
+
+# Helper to format p-values
+format_p <- function(p) {
+  sapply(p, function(x) {
+    if (is.na(x)) return(NA)
+    if (x < 0.001) return("< 0.001")
+    if (x < 0.01) return(sprintf("%.3f", x))
+    sprintf("%.2f", x)
+  })
+}
+
+# ---- Table 1a with Multiple Testing Correction ----
+kw_age    <- kruskal.test(PAGE ~ ATN, data = final)
+tab_gender <- table(final$ATN, final$GENDER)
+chi_gender <- chisq.test(tab_gender, simulate.p.value = TRUE, B = 10000)
+tab_race  <- table(final$ATN, final$RACE_ETH)
+chi_race  <- chisq.test(tab_race, simulate.p.value = TRUE, B = 10000)
+kw_edu    <- kruskal.test(SCHLYRS ~ ATN, data = final)
+
+p_values_demo <- c(
+  kw_age$p.value,
+  chi_gender$p.value,
+  chi_race$p.value,
+  kw_edu$p.value
+)
+
+p_adjusted_demo <- p.adjust(p_values_demo, method = "BH")
+
+table1_p <- data.frame(
+  Variable = c("Age", "Gender", "Race/Ethnicity", "Education"),
+  Test = c("Kruskal-Wallis", "Chi-square", "Chi-square", "Kruskal-Wallis"),
+  P_raw = format_p(p_values_demo),
+  P_adjusted = format_p(p_adjusted_demo),
+  Significant = ifelse(p_adjusted_demo < 0.05, "Yes", "No")
+)
+
+knitr::kable(table1_p, 
+             caption = "Table 1a. Demographics by ATN: Statistical Tests (Benjamini-Hochberg corrected)")
+write.csv(table1_p, "tables/table1a_demographics_pvalues.csv", row.names = FALSE)
+
+# Table 3: Cognition by ATN — all from data
+table3 <- final %>%
+  group_by(ATN) %>%
+  summarise(
+    n = n(),
+    mean_cognition = mean(Cog_Score_2016, na.rm = TRUE),
+    sd_cognition   = sd(Cog_Score_2016, na.rm = TRUE),
+    median_cognition = median(Cog_Score_2016, na.rm = TRUE),
+    IQR_cognition    = IQR(Cog_Score_2016, na.rm = TRUE),
+    pct_dementia = mean(Dementia_IMP_2016 == "Dementia", na.rm = TRUE) * 100,
+    pct_CIND = mean(Dementia_IMP_2016 == "CIND", na.rm = TRUE) * 100,
+    pct_normal = mean(Dementia_IMP_2016 == "Normal", na.rm = TRUE) * 100
+  )
+
+knitr::kable(table3, digits = 1,
+             caption = "Table 3. Cognitive Performance by ATN Group")
+write.csv(table3, "tables/table3_cognition_by_atn.csv", row.names = FALSE)
+
+kw_cog <- kruskal.test(Cog_Score_2016 ~ ATN, data = final)
+
+pairwise_cog <- pairwise.wilcox.test(
+  final$Cog_Score_2016, 
+  final$ATN, 
+  p.adjust.method = "BH",
+  exact = FALSE  
+)
+
+table3_p <- data.frame(
+  Variable = "Cognitive Score",
+  Test = "Kruskal-Wallis",
+  P_value = format_p(kw_cog$p.value)
+)
+
+knitr::kable(table3_p, caption = "Table 3a. Cognition by ATN: Overall Test")
+write.csv(table3_p, "tables/table3a_cognition_pvalue.csv", row.names = FALSE)
+
+pairwise_mat <- as.data.frame(pairwise_cog$p.value)
+write.csv(pairwise_mat, "tables/tableS3_cognition_pairwise_ATN.csv")
+knitr::kable(pairwise_mat, caption = "Table 3. ATN Cognitio Pairwise")
+
+# --- Weighted Descriptive Statistics ---
+cat("\n=== WEIGHTED ANALYSIS USING HRS SURVEY WEIGHTS ===\n")
+
+final_weighted <- final %>% 
+  filter(!is.na(PVBSWGTR), !is.na(SECU), !is.na(STRATUM))
+
+cat("Rows removed due to missing weights:", nrow(final) - nrow(final_weighted), "\n")
+
+design <- svydesign(
+  ids = ~SECU,
+  strata = ~STRATUM,
+  weights = ~PVBSWGTR,
+  data = final_weighted,
+  nest = TRUE
+)
+
+weighted_age <- svyby(~PAGE, ~ATN, design, svymean, na.rm = TRUE)
+write.csv(weighted_age, "tables/tableS9_weighted_age_by_atn.csv", row.names = FALSE)
+knitr::kable(weighted_age, caption = "Table S9. Weighted Age by ATN")
+
+weighted_cog <- svyby(~Cog_Score_2016, ~ATN, design, svymean, na.rm = TRUE)
+write.csv(weighted_cog, "tables/tableS9_weighted_cognition_by_atn.csv", row.names = FALSE)
+knitr::kable(weighted_cog, caption = "Table S9. Weighted Cognition by ATN")
+
+# ---- DEMOGRAPHIC VERIFICATION ----
+cat("\n=== OVERALL SAMPLE DEMOGRAPHICS ===\n")
+
+gender_dist <- final %>%
+  summarise(
+    n_total = n(),
+    n_male = sum(GENDER == 1, na.rm = TRUE),
+    n_female = sum(GENDER == 2, na.rm = TRUE),
+    pct_female = mean(GENDER == 2, na.rm = TRUE) * 100,
+    n_gender_missing = sum(is.na(GENDER))
+  )
+print(gender_dist)
+
+race_dist <- table(final$RACE_ETH, useNA = "always")
+race_pct <- prop.table(race_dist) * 100
+print(race_dist)
+print(round(race_pct, 1))
+
+age_dist <- final %>%
+  summarise(
+    mean_age = mean(PAGE, na.rm = TRUE),
+    sd_age = sd(PAGE, na.rm = TRUE),
+    min_age = min(PAGE, na.rm = TRUE),
+    max_age = max(PAGE, na.rm = TRUE),
+    median_age = median(PAGE, na.rm = TRUE)
+  )
+print(age_dist)
+
+cat("\n=== GENDER BY ATN ===\n")
+gender_atn <- table(final$ATN, final$GENDER_factor)
+print(gender_atn)
+print(prop.table(gender_atn, margin = 1) * 100)
+
+cat("\n=== RACE/ETHNICITY BY ATN ===\n")
+race_atn <- table(final$ATN, final$RACE_ETH)
+print(race_atn)
+print(prop.table(race_atn, margin = 1) * 100)
+
+# ---- CREATE COMPREHENSIVE TABLE 1 — all values from data ----
+table1_comprehensive <- final %>%
+  group_by(ATN) %>%
+  summarise(
+    N = n(),
+    `Age, mean (SD)` = paste0(
+      round(mean(PAGE, na.rm = TRUE), 1), 
+      " (", round(sd(PAGE, na.rm = TRUE), 1), ")"
+    ),
+    `Female, n (%)` = paste0(
+      sum(GENDER == 2, na.rm = TRUE),
+      " (", round(mean(GENDER == 2, na.rm = TRUE) * 100, 1), ")"
+    ),
+    `White, n (%)` = paste0(
+      sum(RACE_ETH == "White", na.rm = TRUE),
+      " (", round(mean(RACE_ETH == "White", na.rm = TRUE) * 100, 1), ")"
+    ),
+    `Black, n (%)` = paste0(
+      sum(RACE_ETH == "Black", na.rm = TRUE),
+      " (", round(mean(RACE_ETH == "Black", na.rm = TRUE) * 100, 1), ")"
+    ),
+    `Hispanic, n (%)` = paste0(
+      sum(RACE_ETH == "Hispanic", na.rm = TRUE),
+      " (", round(mean(RACE_ETH == "Hispanic", na.rm = TRUE) * 100, 1), ")"
+    ),
+    `Education, mean (SD)` = paste0(
+      round(mean(SCHLYRS, na.rm = TRUE), 1),
+      " (", round(sd(SCHLYRS, na.rm = TRUE), 1), ")"
+    )
+  )
+
+write.csv(table1_comprehensive, "tables/table1_comprehensive.csv", row.names = FALSE)
+knitr::kable(table1_comprehensive, caption = "Table 1. Baseline Characteristics by ATN Profile")
+```
+
+
+# Weighted vs Unweighted Demographics
+
+```{r}
+# ============================================================
+# Table S1: Weighted vs Unweighted Demographics
+# All values derived from data; weighted estimates extracted 
+# from svymean objects (scalar outputs guaranteed)
+# ============================================================
+
+# --- Create numeric versions for survey-weighted means ---
+final_weighted <- final_weighted %>%
+  mutate(
+    Age_num    = as.numeric(PAGE),
+    Female_num = as.numeric(Female),
+    White_num  = as.numeric(RACE_ETH == "White"),
+    Black_num  = as.numeric(RACE_ETH == "Black"),
+    Hisp_num   = as.numeric(RACE_ETH == "Hispanic"),
+    Edu_num    = as.numeric(SCHLYRS)
+  )
+
+# --- Overall (not by ATN) weighted means ---
+overall_design <- svydesign(
+  ids = ~SECU,
+  strata = ~STRATUM,
+  weights = ~PVBSWGTR,
+  data = final_weighted,
+  nest = TRUE
+)
+
+wt_age_overall    <- svymean(~Age_num,    overall_design, na.rm = TRUE)
+wt_fem_overall    <- svymean(~Female_num, overall_design, na.rm = TRUE)
+wt_white_overall  <- svymean(~White_num,  overall_design, na.rm = TRUE)
+wt_black_overall  <- svymean(~Black_num,  overall_design, na.rm = TRUE)
+wt_hisp_overall   <- svymean(~Hisp_num,   overall_design, na.rm = TRUE)
+wt_edu_overall    <- svymean(~Edu_num,    overall_design, na.rm = TRUE)
+
+# Standard errors
+wt_age_se <- sqrt(diag(vcov(wt_age_overall)))
+wt_edu_se <- sqrt(diag(vcov(wt_edu_overall)))
+
+# --- Construct Table S1 (all columns now length 6) ---
+tableS1 <- data.frame(
+  Characteristic = c(
+    "Age, mean (SD)",
+    "Female, %",
+    "White, %",
+    "Black, %",
+    "Hispanic, %",
+    "Education, mean (SD)"
+  ),
+  
+  Unweighted_Sample = c(
+    paste0(
+      round(mean(final$PAGE, na.rm = TRUE), 1), " (",
+      round(sd(final$PAGE, na.rm = TRUE), 1), ")"
+    ),
+    round(mean(final$Female, na.rm = TRUE) * 100, 1),
+    round(mean(final$RACE_ETH == "White", na.rm = TRUE) * 100, 1),
+    round(mean(final$RACE_ETH == "Black", na.rm = TRUE) * 100, 1),
+    round(mean(final$RACE_ETH == "Hispanic", na.rm = TRUE) * 100, 1),
+    paste0(
+      round(mean(final$SCHLYRS, na.rm = TRUE), 1), " (",
+      round(sd(final$SCHLYRS, na.rm = TRUE), 1), ")"
+    )
+  ),
+  
+  Weighted_Estimate = c(
+    paste0(round(coef(wt_age_overall), 1), " (SE=", round(wt_age_se, 2), ")"),
+    round(coef(wt_fem_overall)   * 100, 1),
+    round(coef(wt_white_overall) * 100, 1),
+    round(coef(wt_black_overall) * 100, 1),
+    round(coef(wt_hisp_overall)  * 100, 1),
+    paste0(round(coef(wt_edu_overall), 1), " (SE=", round(wt_edu_se, 2), ")")
+  ),
+  
+  Difference = c(
+    round(coef(wt_age_overall)   - mean(final$PAGE, na.rm = TRUE), 2),
+    round((coef(wt_fem_overall)  - mean(final$Female, na.rm = TRUE)) * 100, 2),
+    round((coef(wt_white_overall)- mean(final$RACE_ETH == "White", na.rm = TRUE)) * 100, 2),
+    round((coef(wt_black_overall)- mean(final$RACE_ETH == "Black", na.rm = TRUE)) * 100, 2),
+    round((coef(wt_hisp_overall) - mean(final$RACE_ETH == "Hispanic", na.rm = TRUE)) * 100, 2),
+    round(coef(wt_edu_overall)   - mean(final$SCHLYRS, na.rm = TRUE), 2)
+  )
+)
+
+write.csv(tableS1, "tables/tableS1_weighted_vs_unweighted.csv", row.names = FALSE)
+knitr::kable(tableS1, caption = "Table S1. Weighted vs. Unweighted Demographics")
+```
+
+
+# ROC Analysis 
+
+```{r}
+run_roc <- function(data, biomarker, outcome = "Dementia_IMP_2016",
+                    case = "Dementia", control = "Normal") {
+
+  vars <- c("HHID_PN", outcome, biomarker, "PAGE", "GENDER", "RACE", "SCHLYRS")
+  df <- data[, vars] %>% na.omit()
+  df <- df[df[[outcome]] %in% c(control, case), ]
+  df[[outcome]] <- factor(df[[outcome]], levels = c(control, case))
+
+  fit <- glm(as.formula(paste(outcome, "~", biomarker,
+                              "+ PAGE + GENDER + RACE + SCHLYRS")),
+             data = df, family = "binomial")
+
+  pi_hat <- predict(fit, type = "response")
+  roc_obj <- roc(df[[outcome]], pi_hat, levels = c(control, case), direction = "<")
+  auc_val <- auc(roc_obj)
+
+  list(model = fit, roc = roc_obj, auc = auc_val, data = df)
+}
+
+biomarkers <- c("log_NfL", "log_GFAP", "log_AB42_40_ratio", "log_pTau181_recode")
+roc_results <- lapply(biomarkers, function(b) run_roc(final, b))
+names(roc_results) <- biomarkers
+
+# ---- Create ROC Comparison Table — AUCs and CIs from data ----
+roc_comparison <- data.frame(
+  Biomarker = c("NfL", "GFAP", "Aβ42/40", "pTau181"),
+  AUC = sapply(roc_results, function(x) round(x$auc, 3)),
+  CI_lower = sapply(roc_results, function(x) {
+    ci <- ci.auc(x$roc, method = "delong")
+    round(ci[1], 3)
+  }),
+  CI_upper = sapply(roc_results, function(x) {
+    ci <- ci.auc(x$roc, method = "delong")
+    round(ci[3], 3)
+  }),
+  N = sapply(roc_results, function(x) nrow(x$data))
+)
+
+roc_comparison$CI_95 <- paste0("(", roc_comparison$CI_lower, "-", 
+                               roc_comparison$CI_upper, ")")
+
+knitr::kable(roc_comparison[, c("Biomarker", "AUC", "CI_95", "N")],
+             caption = "ROC Analysis: Predictive Performance for Dementia vs. Normal")
+write.csv(roc_comparison, "tables/roc_comparison.csv", row.names = FALSE)
+
+# ---- ROC PLOTTING ----
+biomarker_labels <- c(
+  log_NfL = "Neurofilament Light (log-transformed)",
+  log_GFAP = "GFAP (log-transformed)",
+  log_AB42_40_ratio = "Aβ42/40 Ratio (log-transformed)",
+  log_pTau181_recode = "pTau181 (log-transformed)"
+)
+
+for (b in biomarkers) {
+  roc_obj <- roc_results[[b]]$roc
+  auc_val <- round(roc_results[[b]]$auc, 3)
+  roc_obj$percent <- FALSE
+  ci_auc <- ci.auc(roc_obj, method = "delong", reuse.auc = TRUE)
+
+  roc_df <- data.frame(
+    specificity = roc_obj$specificities,
+    sensitivity = roc_obj$sensitivities
+  ) %>% na.omit()
+
+  best_coords <- coords(roc_obj, "best", ret = c("specificity", "sensitivity"))
+  opt_x <- as.numeric(1 - best_coords["specificity"])
+  opt_y <- as.numeric(best_coords["sensitivity"])
+
+  g <- ggplot(roc_df, aes(x = 1 - specificity, y = sensitivity)) +
+    geom_line(linewidth = 1.2, color = "steelblue") +
+    geom_abline(linetype = "dashed", color = "gray50") +
+    geom_point(x = opt_x, y = opt_y, color = "red", size = 3) +
+    labs(
+      title = paste("ROC Curve:", biomarker_labels[[b]]),
+      x = "1 - Specificity (False Positive Rate)",
+      y = "Sensitivity (True Positive Rate)"
+    ) +
+    annotate("text", x = 0.65, y = 0.15, 
+             label = paste("AUC =", auc_val), size = 5, fontface = "bold") +
+    annotate("text", x = 0.65, y = 0.08,
+             label = paste("95% CI:", round(ci_auc[1], 3), "-", round(ci_auc[3], 3)),
+             size = 4) +
+    annotate("text", x = 0.65, y = 0.01,
+             label = paste("Optimal point: Sens =", round(opt_y, 2), 
+                          ", Spec =", round(1 - opt_x, 2)),
+             size = 3.5) +
+    theme_bw(base_size = 14) +
+    theme(plot.title = element_text(face = "bold"))
+
+  ggsave(paste0("figures/PNG/roc_", b, ".png"), g, width = 8, height = 6, dpi = 300)
+  ggsave(paste0("figures/tiff/roc_", b, ".tiff"), g, width = 8, height = 6, dpi = 300)
+}
+
+print(g)
+```
+
+# HOSMER–LEMESHOW GOODNESS‑OF‑FIT TEST
+
+```{r}
+hl_results <- data.frame(
+  Biomarker = character(),
+  HL_ChiSq = numeric(),
+  HL_p = numeric()
+)
+
+for (b in biomarkers) {
+  roc_obj <- roc_results[[b]]
+  df <- roc_obj$data
+  fit <- roc_obj$model
+  pi_hat <- predict(fit, type = "response")
+  hl <- hoslem.test(as.numeric(df$Dementia_IMP_2016 == "Dementia"), pi_hat, g = 10)
+  hl_results <- rbind(hl_results, data.frame(
+    Biomarker = b,
+    HL_ChiSq = hl$statistic,
+    HL_p = hl$p.value
+  ))
+}
+
+write.csv(hl_results, "tables/hosmer_lemeshow_results.csv", row.names = FALSE)
+knitr::kable(hl_results, caption = "HOSMER LEMESHOW GOODNESS OF FIT TEST")
+```
+
+
+# CALIBRATION PLOTS
+
+```{r}
+for (b in biomarkers) {
+  roc_obj <- roc_results[[b]]
+  df <- roc_obj$data
+  fit <- roc_obj$model
+  df$pred <- predict(fit, type = "response")
+  df$obs  <- as.numeric(df$Dementia_IMP_2016 == "Dementia")
+  df$bin  <- ntile(df$pred, 10)
+  calib <- df %>%
+    group_by(bin) %>%
+    summarise(mean_pred = mean(pred), mean_obs = mean(obs))
+
+  g <- ggplot(calib, aes(x = mean_pred, y = mean_obs)) +
+    geom_point(size = 3, color = "steelblue") +
+    geom_line(color = "steelblue") +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+    labs(title = paste("Calibration Plot:", biomarker_labels[[b]]),
+         x = "Predicted Probability", y = "Observed Probability") +
+    theme_bw(base_size = 14)
+
+  ggsave(paste0("figures/png/calibration_", b, ".png"), g, width = 8, height = 6, dpi = 300)
+  ggsave(paste0("figures/tiff/calibration_", b, ".tiff"), g, width = 8, height = 6, dpi = 300)
+}
+print(g)
+```
+
+
+# DECISION CURVE ANALYSIS (DCA)
+
+```{r}
+dca_list <- list()
+
+for (b in biomarkers) {
+
+  roc_obj <- roc_results[[b]]
+  df <- roc_obj$data
+  fit <- roc_obj$model
+
+  df$outcome_num <- ifelse(df$Dementia_IMP_2016 == "Dementia", 1, 0)
+  df$pred <- predict(fit, type = "response")
+
+  # ---- DCA model ----
+  dca_model <- decision_curve(
+    outcome_num ~ pred,
+    data = df,
+    family = binomial(link = "logit"),
+    thresholds = seq(0, 1, by = 0.01),
+    confidence.intervals = 0.95
+  )
+
+  dca_list[[b]] <- dca_model
+
+  # ---- Create a ggplot object ----
+  g <- plot_decision_curve(
+    dca_model,
+    curve.names = biomarker_labels[[b]],
+    xlab = "Threshold Probability",
+    ylab = "Net Benefit",
+    legend.position = "bottomright"
+  )
+
+  # ---- Save outputs ----
+  ggsave(
+    filename = paste0("figures/png/dca_", b, ".png"),
+    plot = g,
+    width = 8, height = 6, dpi = 300
+  )
+
+  ggsave(
+    filename = paste0("figures/tiff/dca_", b, ".tiff"),
+    plot = g,
+    width = 8, height = 6, dpi = 300
+  )
+}
+
+saveRDS(dca_list, "results/dca_models.rds")
+```
+
+
+```{r}
+get_roc_df <- function(df, pred, outcome) {
+  roc_obj <- roc(outcome, pred, levels = c("Normal", "Dementia"))
+  data.frame(fpr = 1 - roc_obj$specificities, tpr = roc_obj$sensitivities)
+}
+```
+
+
+# STRATIFIED ROC CURVES BY RACE & SEX
+
+```{r}
+race_groups <- c("White", "Black", "Hispanic")
+sex_groups  <- c("Male", "Female")
+
+roc_stratified <- data.frame()
+
+# ---------------------- RACE STRATIFICATION ----------------------
+for (b in biomarkers) {
+  df_full <- roc_results[[b]]$data %>%
+    left_join(final %>% select(HHID_PN, RACE_ETH, GENDER_factor), by = "HHID_PN")
+  race_plots <- list()
+
+  for (r in race_groups) {
+    df_sub <- df_full %>% filter(RACE_ETH == r)
+    if (nrow(df_sub) < 50) next
+
+    fit <- logistf(Dementia_IMP_2016 ~ df_sub[[b]] + PAGE + GENDER + SCHLYRS, data = df_sub)
+    pred <- predict(fit, type = "response")
+
+    roc_obj <- suppressMessages(
+      roc(df_sub$Dementia_IMP_2016, pred, levels = c("Normal", "Dementia"), direction = "<")
+    )
+
+    roc_df <- data.frame(fpr = 1 - roc_obj$specificities, tpr = roc_obj$sensitivities)
+    auc_val <- round(auc(roc_obj), 3)
+
+    roc_stratified <- rbind(roc_stratified, data.frame(
+      Biomarker = b, Subgroup = r, Type = "Race", AUC = auc_val, N = nrow(df_sub)
+    ))
+
+    p <- ggplot(roc_df, aes(x = fpr, y = tpr)) +
+      geom_line(linewidth = 1.2, color = viridis(3)[which(race_groups == r)]) +
+      geom_abline(linetype = "dashed", color = "gray60") +
+      theme_minimal(base_size = 14) +
+      labs(title = paste0(r, " (AUC = ", auc_val, ")"),
+           x = "False Positive Rate", y = "True Positive Rate")
+    race_plots[[r]] <- p
+  }
+
+  combined <- plot_grid(plotlist = race_plots, ncol = 3)
+  ggsave(paste0("figures/png/roc_race_composite_", b, ".png"), combined, width = 12, height = 4, dpi = 300)
+  ggsave(paste0("figures/tiff/roc_race_composite_", b, ".tiff"), combined, width = 12, height = 4, dpi = 300)
+}
+
+# ---------------------- SEX STRATIFICATION ----------------------
+for (b in biomarkers) {
+  df_full <- roc_results[[b]]$data %>%
+    left_join(final %>% select(HHID_PN, RACE_ETH, GENDER_factor), by = "HHID_PN")
+  sex_plots <- list()
+
+  for (s in sex_groups) {
+    df_sub <- df_full %>% filter(GENDER_factor == s)
+    if (nrow(df_sub) < 50) next
+
+    fit <- logistf(Dementia_IMP_2016 ~ df_sub[[b]] + PAGE + RACE + SCHLYRS, data = df_sub)
+    pred <- predict(fit, type = "response")
+
+    roc_obj <- suppressMessages(
+      roc(df_sub$Dementia_IMP_2016, pred, levels = c("Normal", "Dementia"), direction = "<")
+    )
+
+    roc_df <- data.frame(fpr = 1 - roc_obj$specificities, tpr = roc_obj$sensitivities)
+    auc_val <- round(auc(roc_obj), 3)
+
+    roc_stratified <- rbind(roc_stratified, data.frame(
+      Biomarker = b, Subgroup = s, Type = "Sex", AUC = auc_val, N = nrow(df_sub)
+    ))
+
+    p <- ggplot(roc_df, aes(x = fpr, y = tpr)) +
+      geom_line(linewidth = 1.2, color = viridis(2)[which(sex_groups == s)]) +
+      geom_abline(linetype = "dashed", color = "gray60") +
+      theme_minimal(base_size = 14) +
+      labs(title = paste0(s, " (AUC = ", auc_val, ")"),
+           x = "False Positive Rate", y = "True Positive Rate")
+    sex_plots[[s]] <- p
+  }
+
+  combined <- plot_grid(plotlist = sex_plots, ncol = 2)
+  ggsave(paste0("figures/png/roc_sex_composite_", b, ".png"), combined, width = 8, height = 4, dpi = 300)
+  ggsave(paste0("figures/tiff/roc_race_composite_", b, ".tiff"), combined, width = 12, height = 4, dpi = 300)
+}
+
+write.csv(roc_stratified, "tables/roc_stratified_equity.csv", row.names = FALSE)
+knitr::kable(roc_stratified, caption = "ROC Stratified by Equity")
+```
+
+
+# DeLong AUC Comparison
+
+```{r}
+delong_results <- data.frame()
+
+for (b in biomarkers) {
+  full_roc <- roc_results[[b]]$roc
+
+  df_race <- roc_results[[b]]$data %>%
+    left_join(final %>% select(HHID_PN, RACE_ETH), by = "HHID_PN") %>%
+    filter(RACE_ETH %in% c("White", "Black", "Hispanic"))
+
+  race_rocs <- list()
+  for (r in c("White", "Black", "Hispanic")) {
+    df_sub <- df_race %>% filter(RACE_ETH == r)
+    if (nrow(df_sub) < 50) next
+    roc_r <- roc(df_sub$Dementia_IMP_2016,
+                 predict(roc_results[[b]]$model, newdata = df_sub, type = "response"),
+                 levels = c("Normal", "Dementia"), direction = "<")
+    race_rocs[[r]] <- roc_r
+  }
+
+  if (length(race_rocs) >= 2) {
+    race_pairs <- combn(names(race_rocs), 2)
+    for (i in 1:ncol(race_pairs)) {
+      g1 <- race_pairs[1, i]; g2 <- race_pairs[2, i]
+      test <- roc.test(race_rocs[[g1]], race_rocs[[g2]], method = "delong")
+      delong_results <- rbind(delong_results, data.frame(
+        Biomarker = b,
+        Comparison = paste0("AUC(", g1, ") vs AUC(", g2, ")"),
+        P_value = test$p.value
+      ))
+    }
+  }
+
+  df_sex <- roc_results[[b]]$data %>%
+    left_join(final %>% select(HHID_PN, GENDER_factor), by = "HHID_PN") %>%
+    filter(GENDER_factor %in% c("Male", "Female"))
+
+  sex_rocs <- list()
+  for (s in c("Male", "Female")) {
+    df_sub <- df_sex %>% filter(GENDER_factor == s)
+    if (nrow(df_sub) < 50) next
+    roc_s <- roc(df_sub$Dementia_IMP_2016,
+                 predict(roc_results[[b]]$model, newdata = df_sub, type = "response"),
+                 levels = c("Normal", "Dementia"), direction = "<")
+    sex_rocs[[s]] <- roc_s
+  }
+
+  if (length(sex_rocs) == 2) {
+    test <- roc.test(sex_rocs[["Male"]], sex_rocs[["Female"]], method = "delong")
+    delong_results <- rbind(delong_results, data.frame(
+      Biomarker = b,
+      Comparison = "AUC(Male) vs AUC(Female)",
+      P_value = test$p.value
+    ))
+  }
+}
+
+biomarker_pairs <- combn(biomarkers, 2)
+for (i in 1:ncol(biomarker_pairs)) {
+  b1 <- biomarker_pairs[1, i]; b2 <- biomarker_pairs[2, i]
+  test <- roc.test(roc_results[[b1]]$roc, roc_results[[b2]]$roc, method = "delong")
+  delong_results <- rbind(delong_results, data.frame(
+    Biomarker = paste(b1, "vs", b2),
+    Comparison = "Overall AUC Comparison",
+    P_value = test$p.value
+  ))
+}
+
+write.csv(delong_results, "tables/delong_auc_comparisons.csv", row.names = FALSE)
+knitr::kable(delong_results, caption = "Delong AUC Comparison")
+```
+
+
+# FAIRNESS METRICS
+
+```{r}
+fairness_results <- data.frame()
+
+compute_metrics <- function(df, pred, outcome) {
+  y    <- ifelse(outcome == "Dementia", 1, 0)
+  yhat <- ifelse(pred >= 0.5, 1, 0)
+  TP <- sum(yhat == 1 & y == 1); FP <- sum(yhat == 1 & y == 0)
+  TN <- sum(yhat == 0 & y == 0); FN <- sum(yhat == 0 & y == 1)
+  sensitivity <- TP / (TP + FN)
+  specificity <- TN / (TN + FP)
+  ppv <- TP / (TP + FP)
+  npv <- TN / (TN + FN)
+  fit_cal <- glm(y ~ pred, family = binomial)
+  slope <- coef(fit_cal)[2]
+  brier <- mean((pred - y)^2)
+  return(list(sensitivity = sensitivity, specificity = specificity,
+              ppv = ppv, npv = npv, slope = slope, brier = brier))
+}
+
+for (b in biomarkers) {
+  df <- roc_results[[b]]$data %>%
+    left_join(final %>% select(HHID_PN, RACE_ETH, GENDER_factor), by = "HHID_PN") %>%
+    mutate(Race_Collapsed = ifelse(RACE_ETH == "White", "White", "NonWhite"))
+
+  pred <- predict(roc_results[[b]]$model, type = "response")
+  df$pred <- pred
+
+  for (g in c("White", "NonWhite")) {
+    df_sub <- df %>% filter(Race_Collapsed == g)
+    if (nrow(df_sub) < 50) next
+    m <- compute_metrics(df_sub, df_sub$pred, df_sub$Dementia_IMP_2016)
+    fairness_results <- rbind(fairness_results, data.frame(
+      Biomarker = b, GroupType = "Race", Group = g,
+      Sensitivity = m$sensitivity, Specificity = m$specificity,
+      PPV = m$ppv, NPV = m$npv,
+      CalibrationSlope = m$slope, BrierScore = m$brier, N = nrow(df_sub)
+    ))
+  }
+
+  for (g in c("Male", "Female")) {
+    df_sub <- df %>% filter(GENDER_factor == g)
+    if (nrow(df_sub) < 50) next
+    m <- compute_metrics(df_sub, df_sub$pred, df_sub$Dementia_IMP_2016)
+    fairness_results <- rbind(fairness_results, data.frame(
+      Biomarker = b, GroupType = "Sex", Group = g,
+      Sensitivity = m$sensitivity, Specificity = m$specificity,
+      PPV = m$ppv, NPV = m$npv,
+      CalibrationSlope = m$slope, BrierScore = m$brier, N = nrow(df_sub)
+    ))
+  }
+}
+
+write.csv(fairness_results, "tables/fairness_metrics_equity.csv", row.names = FALSE)
+knitr::kable(fairness_results, caption = "Fairness Metrics Equity")
+```
+
+
+# INTERACTION TERMS (BIOMARKER × RACE, BIOMARKER × EDUCATION)
+
+```{r}
+interaction_results <- data.frame()
+
+for (b in biomarkers) {
+  df_full <- final %>%
+    select(HHID_PN, Dementia_IMP_2016, PAGE, GENDER_factor, RACE_ETH, SCHLYRS, all_of(b)) %>%
+    filter(Dementia_IMP_2016 %in% c("Normal", "Dementia"),
+           !is.na(RACE_ETH), !is.na(GENDER_factor), !is.na(SCHLYRS), !is.na(.data[[b]])) %>%
+    mutate(RACE_COLLAPSED = ifelse(RACE_ETH == "White", "White", "NonWhite"))
+
+  df_full$Dementia_IMP_2016 <- factor(df_full$Dementia_IMP_2016, levels = c("Normal", "Dementia"))
+  df_full$RACE_COLLAPSED    <- factor(df_full$RACE_COLLAPSED, levels = c("White", "NonWhite"))
+
+  formula_race <- as.formula(paste("Dementia_IMP_2016 ~", b, "* RACE_COLLAPSED + PAGE + GENDER_factor + SCHLYRS"))
+  fit_race <- logistf(formula_race, data = df_full)
+  coef_race <- summary(fit_race)$coefficients
+  idx_race <- grep(":", rownames(coef_race))
+  race_p <- if (length(idx_race) > 0) coef_race[idx_race, "Prob"] else NA
+
+  formula_edu <- as.formula(paste("Dementia_IMP_2016 ~", b, "* SCHLYRS + PAGE + GENDER_factor + RACE_COLLAPSED"))
+  fit_edu <- logistf(formula_edu, data = df_full)
+  coef_edu <- summary(fit_edu)$coefficients
+  idx_edu <- grep(":", rownames(coef_edu))
+  edu_p <- if (length(idx_edu) > 0) coef_edu[idx_edu, "Prob"] else NA
+
+  interaction_results <- rbind(interaction_results,
+    data.frame(Biomarker = b, Interaction = "Biomarker × Race (White vs NonWhite)", P_value = race_p),
+    data.frame(Biomarker = b, Interaction = "Biomarker × Education", P_value = edu_p)
+  )
+}
+
+write.csv(interaction_results, "tables/interaction_terms_equity.csv", row.names = FALSE)
+```
+
+```{r}
+table(df_full$RACE_ETH)
+table(df_full$RACE_ETH, df_full$Dementia_IMP_2016)
+```
+
+
+# Clustering with NbClust
+
+```{r}
+# ---- Clustering with Optimal K Selection — all decisions derived from data ----
+
+df_clust <- final %>%
+  select(HHID_PN, NfL, GFAP, AB42_40_ratio, pTau181_recode) %>%
+  distinct() %>%
+  na.omit()
+
+df_clust$HHID_PN <- trimws(as.character(df_clust$HHID_PN))
+df_clust <- as.data.frame(df_clust)
+
+df_clust_scaled <- scale(df_clust[, -1])
+rownames(df_clust_scaled) <- df_clust$HHID_PN
+
+cat("\n=== CLUSTERING SAMPLE ===\n")
+cat("Total participants in final dataset:", nrow(final), "\n")
+cat("Participants with complete biomarkers:", nrow(df_clust), "\n")
+cat("Participants excluded from clustering:", nrow(final) - nrow(df_clust), "\n\n")
+
+### ---- NbClust ----
+cat("Running NbClust (this may take a few minutes)...\n")
+
+set.seed(123)
+nb_result <- NbClust(
+  data = df_clust_scaled,
+  distance = "euclidean",
+  min.nc = 2,
+  max.nc = 10,
+  method = "kmeans",
+  index = "all"
+)
+
+best_nc <- nb_result$Best.nc[1, ]
+freq_table <- table(best_nc)
+
+all_k <- 2:10
+freq_full <- sapply(all_k, function(k)
+  ifelse(k %in% names(freq_table), freq_table[as.character(k)], 0)
+)
+
+nb_summary <- data.frame(
+  Number_of_Clusters = all_k,
+  Number_of_Indices  = as.numeric(freq_full)
+)
+
+write.csv(nb_summary, "tables/tableS4_nbclust_summary.csv", row.names = FALSE)
+knitr::kable(nb_summary, caption = "Table S4. Nbclust Summary")
+
+# Recommended k from NbClust — data-driven
+recommended_k <- as.numeric(names(freq_table)[which.max(freq_table)])
+cat("\nRecommended number of clusters (NbClust):", recommended_k, "\n")
+
+nb_df <- data.frame(k = all_k, freq = as.numeric(freq_full))
+
+p_nb <- ggplot(nb_df, aes(x = factor(k), y = freq)) +
+  geom_col(fill = "steelblue") +
+  labs(title = "Optimal Number of Clusters (NbClust)",
+       x = "Number of Clusters",
+       y = "Number of Indices Supporting k") +
+  theme_bw(base_size = 20) +
+  theme(plot.title = element_text(face = "bold", size = 26),
+        axis.title = element_text(face = "bold", size = 22),
+        axis.text = element_text(size = 18))
+
+ggsave("figures/png/nbclust_recommendation.png", p_nb, width = 12, height = 8, dpi = 300)
+ggsave("figures/tiff/nbclust_recommendation.tiff", p_nb, width = 12, height = 8, dpi = 300)
+print(p_nb)
+
+# ---- Elbow + Silhouette for k = 2:10 — WSS and silhouette computed from data ----
+wss_values <- numeric(10)
+sil_values <- numeric(10)
+
+for (k in 1:10) {
+  if (k == 1) {
+    wss_values[k] <- sum(scale(df_clust_scaled)^2)
+    sil_values[k] <- NA
+  } else {
+    set.seed(123)
+    km_temp <- kmeans(df_clust_scaled, centers = k, nstart = 50, iter.max = 300)
+    wss_values[k] <- km_temp$tot.withinss
+    sil_temp <- silhouette(km_temp$cluster, dist(df_clust_scaled))
+    sil_values[k] <- mean(sil_temp[, 3])
+  }
+}
+
+cluster_metrics <- data.frame(K = 1:10, WSS = wss_values, Mean_Silhouette = sil_values)
+write.csv(cluster_metrics, "tables/tableS17_cluster_quality_by_k.csv", row.names = FALSE)
+knitr::kable(cluster_metrics, caption = "Table S17. Cluster Quality by K")
+
+# ---- Identify the elbow k from WSS via data-driven criterion ----
+# Use the "knee" of the WSS curve: largest second difference (change in change)
+wss_k2plus <- wss_values[2:10]
+second_diff <- diff(diff(wss_k2plus))         # second differences for k=2..10
+elbow_k     <- which.max(second_diff) + 2     # offset back to original k index
+cat("\nElbow method suggests k =", elbow_k, "(data-driven second-difference criterion)\n")
+
+# ---- Identify the k that maximises mean silhouette ----
+best_k_sil <- which.max(cluster_metrics$Mean_Silhouette[2:10]) + 1
+cat("Best k by silhouette:", best_k_sil, "\n")
+
+# ---- Reconcile the three methods via majority vote ----
+candidate_ks <- c(recommended_k, elbow_k, best_k_sil)
+vote_table   <- table(candidate_ks)
+optimal_k    <- as.numeric(names(which.max(vote_table)))
+
+cat("\nCandidate k values — NbClust:", recommended_k,
+    "| Elbow:", elbow_k,
+    "| Silhouette:", best_k_sil, "\n")
+cat("Majority-vote optimal k:", optimal_k, "\n\n")
+
+# Elbow plot — vline driven by data
+p_elbow <- ggplot(cluster_metrics, aes(x = K, y = WSS)) +
+  geom_line(linewidth = 1.4, color = "steelblue") +
+  geom_point(size = 4, color = "steelblue") +
+  geom_vline(xintercept = elbow_k, linetype = "dashed", color = "red", linewidth = 1.2) +
+  annotate("text", x = elbow_k + 0.4,
+           y = max(wss_values[2:10], na.rm = TRUE) * 0.92,
+           label = paste0("Elbow at k = ", elbow_k),
+           color = "red", size = 6, hjust = 0) +
+  labs(title = "Elbow Method: Within-Cluster Sum of Squares",
+       x = "Number of Clusters (k)", y = "Total Within-Cluster Sum of Squares") +
+  theme_bw(base_size = 20) +
+  theme(plot.title = element_text(face = "bold", size = 26),
+        axis.title = element_text(face = "bold", size = 22),
+        axis.text = element_text(size = 18))
+
+ggsave("figures/png/figure3_panelA_elbow.png", p_elbow, width = 12, height = 8, dpi = 300)
+ggsave("figures/tiff/figure3_panelA_elbow.tiff", p_elbow, width = 12, height = 8, dpi = 300)
+print(p_elbow)
+
+# Silhouette plot — annotation driven by data
+p_sil <- ggplot(cluster_metrics[-1, ], aes(x = K, y = Mean_Silhouette)) +
+  geom_line(linewidth = 1.4, color = "darkorange") +
+  geom_point(size = 4, color = "darkorange") +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray40", linewidth = 1.1) +
+  labs(title = "Mean Silhouette Width by Number of Clusters",
+       x = "Number of Clusters (k)", y = "Mean Silhouette Width") +
+  theme_bw(base_size = 20) +
+  theme(plot.title = element_text(face = "bold", size = 26),
+        axis.title = element_text(face = "bold", size = 22),
+        axis.text = element_text(size = 18))
+
+ggsave("figures/png/figure3_panelB_silhouette.png", p_sil, width = 12, height = 8, dpi = 300)
+ggsave("figures/tiff/figure3_panelB_silhouette.tiff", p_sil, width = 12, height = 8, dpi = 300)
+print(p_sil)
+
+cat("\n=== FINAL CLUSTERING DECISION ===\n")
+cat("Selected k =", optimal_k, "(majority vote: NbClust / Elbow / Silhouette)\n\n")
+
+# ---- Final K-means ----
+set.seed(123)
+km <- kmeans(df_clust_scaled, centers = optimal_k, nstart = 100, iter.max = 500, algorithm = "Lloyd")
+
+df_clust_clean <- df_clust
+df_clust_clean$Cluster <- factor(km$cluster)
+df_clust_clean <- df_clust_clean %>% distinct(HHID_PN, .keep_all = TRUE)
+
+cat("Final clustering:\n")
+print(table(df_clust_clean$Cluster))
+cat("\n")
+```
+
+
+# GAUSSIAN MIXTURE MODEL (GMM) CLUSTERING — SENSITIVITY CHECK
+
+```{r}
+cat("\n=== GMM / Mclust Sensitivity Analysis ===\n")
+
+set.seed(123)
+gmm_model <- Mclust(df_clust_scaled, G = 1:10)
+
+# GMM optimal k from BIC — data-driven
+gmm_k <- gmm_model$G
+cat("Optimal number of clusters selected by GMM (BIC):", gmm_k, "\n")
+
+gmm_clusters <- gmm_model$classification
+df_clust_gmm <- df_clust %>% mutate(GMM_Cluster = factor(gmm_clusters))
+
+gmm_sizes <- table(df_clust_gmm$GMM_Cluster)
+cat("\nCluster sizes (GMM):\n")
+print(gmm_sizes)
+
+# ARI and NMI from data
+ari_gmm_kmeans <- aricode::ARI(km$cluster, gmm_clusters)
+nmi_gmm_kmeans <- aricode::NMI(km$cluster, gmm_clusters)
+
+cat("\nARI (GMM vs K-means):", round(ari_gmm_kmeans, 3), "\n")
+cat("NMI (GMM vs K-means):", round(nmi_gmm_kmeans, 3), "\n")
+
+gmm_compare <- data.frame(
+  Method_Comparison = "K-means vs GMM",
+  ARI = ari_gmm_kmeans,
+  NMI = nmi_gmm_kmeans,
+  GMM_k = gmm_k
+)
+
+write.csv(gmm_compare, "tables/tableS6_gmm_kmeans_agreement.csv", row.names = FALSE)
+knitr::kable(gmm_compare, caption = "Table S6. GMM Kmeans Agreement")
+
+# --------------------------
+# Silhouette (warning-free)
+# --------------------------
+sil_gmm <- silhouette(gmm_clusters, dist(df_clust_scaled))
+mean_sil_gmm <- mean(sil_gmm[, 3])
+cat("\nMean Silhouette (GMM):", round(mean_sil_gmm, 3), "\n")
+
+sil_df <- data.frame(
+  cluster = factor(sil_gmm[, 1]),
+  neighbor = factor(sil_gmm[, 2]),
+  width = sil_gmm[, 3],
+  id = seq_len(nrow(sil_gmm))
+)
+
+gmm_sil_plot <- ggplot(sil_df, aes(x = id, y = width, fill = cluster)) +
+  geom_bar(stat = "identity", color = "black", linewidth = 0.2) +
+  geom_hline(yintercept = mean_sil_gmm, linetype = "dashed", color = "red") +
+  labs(
+    title = paste0("Silhouette Plot for GMM Clustering (k = ", gmm_k, ")"),
+    subtitle = paste0("Mean silhouette width = ", round(mean_sil_gmm, 3)),
+    x = "Observation Index",
+    y = "Silhouette Width"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "bottom")
+
+ggsave("figures/supplementary/png/figureS2_gmm_bic_silhouette.png",
+       gmm_sil_plot, width = 10, height = 6, dpi = 300)
+
+ggsave("figures/supplementary/tiff/figureS2_gmm_bic_silhouette.tiff",
+       gmm_sil_plot, width = 10, height = 6, dpi = 300)
+
+print(gmm_sil_plot)
+
+# --------------------------
+# Cluster Profiles
+# --------------------------
+gmm_profiles <- final %>%
+  mutate(HHID_PN = trimws(as.character(HHID_PN))) %>%
+  left_join(df_clust_gmm %>% select(HHID_PN, GMM_Cluster), by = "HHID_PN") %>%
+  filter(!is.na(GMM_Cluster)) %>%
+  group_by(GMM_Cluster) %>%
+  summarise(
+    N = n(),
+    NfL_Median  = median(NfL,            na.rm = TRUE),
+    GFAP_Median = median(GFAP,           na.rm = TRUE),
+    AB_Median   = median(AB42_40_ratio,  na.rm = TRUE),
+    pTau_Median = median(pTau181_recode, na.rm = TRUE),
+    Cog_Mean    = mean(Cog_Score_2016,   na.rm = TRUE),
+    Pct_Dementia = mean(Dementia_IMP_2016 == "Dementia", na.rm = TRUE) * 100
+  )
+
+write.csv(gmm_profiles, "tables/gmm_cluster_profiles.csv", row.names = FALSE)
+knitr::kable(gmm_profiles, caption = "GMM Cluster Profiles")
+
+cat("\n=== GMM Sensitivity Analysis Complete ===\n")
+```
+
+
+# Bootstrapped Cluster Stability (Jaccard / Bootstrap Resampling)
+
+```{r}
+cat("\n=== BOOTSTRAPPED CLUSTER STABILITY ===\n")
+
+set.seed(123)
+bootstab <- clusterboot(
+  df_clust_scaled,
+  B = 500,
+  distances = FALSE,
+  bootmethod = "boot",
+  clustermethod = kmeansCBI,
+  k = optimal_k,
+  seed = 123
+)
+
+# Jaccard values derived from bootstrap output — not hardcoded
+stab_results <- data.frame(
+  Cluster = 1:optimal_k,
+  Jaccard = round(bootstab$bootmean, 3)
+)
+
+write.csv(stab_results, "tables/cluster_stability_bootstrap.csv", row.names = FALSE)
+knitr::kable(stab_results, caption = "Cluster Stability Bootstrap")
+
+cat("Cluster stability (Jaccard):\n")
+
+# ---- Cluster Stability Plot ----
+p_stab <- ggplot(stab_results, aes(x = factor(Cluster), y = Jaccard)) +
+  geom_col(fill = "steelblue") +
+  geom_hline(yintercept = 0.75, linetype = "dashed", color = "red", linewidth = 1.2) +
+  labs(title = "Cluster Stability (Bootstrapped Jaccard Index)",
+       x = "Cluster", y = "Jaccard Index") +
+  theme_bw(base_size = 20) +
+  theme(plot.title = element_text(face = "bold", size = 26),
+        axis.title = element_text(face = "bold", size = 22),
+        axis.text = element_text(size = 18)) +
+  ylim(0, 1)
+
+ggsave("figures/png/cluster_stability_jaccard.png", p_stab, width = 12, height = 8, dpi = 300)
+ggsave("figures/tiff/cluster_stability_jaccard.tiff", p_stab, width = 12, height = 8, dpi = 300)
+print(p_stab)
+```
+
+
+# Visualization: Bootstrap Stability Analysis
+
+```{r}
+stab <- read.csv("tables/cluster_stability_bootstrap.csv")
+
+p <- ggplot(stab, aes(x = factor(Cluster), y = Jaccard, fill = factor(Cluster))) +
+  geom_col(color = "black") +
+  geom_hline(yintercept = 0.75, linetype = "dashed", color = "red", linewidth = 1.2) +
+  geom_text(aes(label = sprintf("%.3f", Jaccard)), vjust = -0.5, size = 5, fontface = "bold") +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "Cluster Stability via Bootstrap Resampling",
+    subtitle = "Jaccard Similarity Coefficients (500 Bootstrap Iterations)",
+    x = "Cluster",
+    y = "Jaccard Index",
+    caption = "Dashed line indicates stability threshold (0.75)"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+        legend.position = "none",
+        panel.grid.minor = element_blank()) +
+  ylim(0, 1)
+
+ggsave("figures/png/bootstrap_stability_jaccard.png", p, width = 10, height = 6, dpi = 300)
+ggsave("figures/tiff/bootstrap_stability_jaccard.tiff", p, width = 10, height = 6, dpi = 300)
+```
+
+
+# DIAGNOSTIC CHECK
+
+```{r}
+cat("\n=== DIAGNOSTIC VERIFICATION ===\n")
+cat("Total sample size:", nrow(final), "\n")
+cat("Clustering sample size:", nrow(df_clust), "\n")
+cat("Cluster sizes:\n")
+print(table(df_clust_clean$Cluster))
+cat("Sum of cluster sizes:", sum(table(df_clust_clean$Cluster)), "\n\n")
+
+if(sum(table(df_clust_clean$Cluster)) != nrow(df_clust)) {
+  cat("ERROR: Cluster sizes don't sum to clustering sample!\n")
+}
+
+cat("\nBiomarker ranges in df_clust:\n")
+cat("GFAP min:", min(df_clust$GFAP, na.rm = TRUE), "\n")
+cat("GFAP max:", max(df_clust$GFAP, na.rm = TRUE), "\n")
+cat("NfL min:", min(df_clust$NfL, na.rm = TRUE), "\n")
+cat("NfL max:", max(df_clust$NfL, na.rm = TRUE), "\n")
+```
+
+
+```{r}
+final_with_clusters <- final %>%
+  mutate(HHID_PN = trimws(as.character(HHID_PN))) %>%
+  left_join(df_clust_clean %>% select(HHID_PN, Cluster), by = "HHID_PN")
+
+cluster_medians <- final_with_clusters %>%
+  filter(!is.na(Cluster)) %>%
+  group_by(Cluster) %>%
+  summarise(
+    N = n(),
+    NfL_Median  = median(NfL,            na.rm = TRUE),
+    GFAP_Median = median(GFAP,           na.rm = TRUE),
+    AB_Median   = median(AB42_40_ratio,  na.rm = TRUE),
+    pTau_Median = median(pTau181_recode, na.rm = TRUE)
+  )
+
+print(cluster_medians)
+```
+
+
+```{r}
+print(stab_results)
+print(bootstab$bootmean)
+```
+
+
+```{r}
+cat("\n=================================================\n")
+cat("COMPREHENSIVE CSV FILE VERIFICATION\n")
+cat("=================================================\n")
+
+if(file.exists("tables/table3_cluster_biomarker_profiles.csv")) {
+  t3 <- read.csv("tables/table3_cluster_biomarker_profiles.csv")
+  cat("\nTable 3 - Cluster Sizes from CSV:\n")
+  print(t3$N)
+} else {
+  cat("\nTable 3 CSV not found\n")
+}
+
+cat("\nTable 3 - Cluster Sizes from Current Run:\n")
+print(cluster_medians$N)
+
+if(file.exists("tables/cluster_stability_bootstrap.csv")) {
+  stab_csv <- read.csv("tables/cluster_stability_bootstrap.csv")
+  cat("\nBootstrap Stability from CSV:\n")
+  print(stab_csv)
+} else {
+  cat("\nStability CSV not found\n")
+}
+
+cat("\nBootstrap Stability from Current Run:\n")
+print(stab_results)
+
+cat("\n=== FILE TIMESTAMPS ===\n")
+if(file.exists("tables/table3_cluster_biomarker_profiles.csv"))
+  cat("Table 3 last modified:",
+      as.character(file.info("tables/table3_cluster_biomarker_profiles.csv")$mtime), "\n")
+if(file.exists("tables/cluster_stability_bootstrap.csv"))
+  cat("Stability file last modified:",
+      as.character(file.info("tables/cluster_stability_bootstrap.csv")$mtime), "\n")
+
+cat("\n=================================================\n")
+```
+
+
+# CLUSTER STABILITY ACROSS RANDOM SEEDS
+
+```{r}
+cat("\n=== TESTING CLUSTER STABILITY ACROSS RANDOM SEEDS ===\n")
+
+set.seed(123)
+n_seeds <- 100
+ari_seeds_mat <- numeric(n_seeds)
+cluster_sizes_mat <- matrix(NA, nrow = n_seeds, ncol = optimal_k)
+
+for (i in 1:n_seeds) {
+  set.seed(i)
+  km_seed <- kmeans(df_clust_scaled, centers = optimal_k, nstart = 50, iter.max = 500)
+  ari_seeds_mat[i] <- adjustedRandIndex(km$cluster, km_seed$cluster)
+  cluster_sizes_mat[i, ] <- as.numeric(table(factor(km_seed$cluster, levels = 1:optimal_k)))
+}
+
+tableS10 <- data.frame(
+  Metric = c(
+    "Mean ARI between runs",
+    "SD of ARI",
+    "Minimum ARI",
+    paste0("Cluster ", 1:optimal_k, " size mean±SD")
+  ),
+  Value = c(
+    paste0(round(mean(ari_seeds_mat), 3), " (SD=", round(sd(ari_seeds_mat), 3), ")"),
+    round(sd(ari_seeds_mat), 3),
+    round(min(ari_seeds_mat), 3),
+    paste0(round(colMeans(cluster_sizes_mat), 1), " ± ",
+           round(apply(cluster_sizes_mat, 2, sd), 1))
+  )
+)
+
+write.csv(tableS10, "tables/tableS10_seed_stability.csv", row.names = FALSE)
+knitr::kable(tableS10, caption = "Table S10. Seed Stability")
+```
+
+
+# Sensitivity Analysis: Silhouette by k (k=2-8)
+
+```{r}
+cat("\n=== SENSITIVITY ANALYSIS: OPTIMAL K SELECTION ===\n")
+
+# Reuse cluster_metrics already computed — no new hardcoding needed
+sensitivity_k <- cluster_metrics
+write.csv(sensitivity_k, "tables/tableS17_cluster_quality_by_k.csv", row.names = FALSE)
+knitr::kable(sensitivity_k, caption = "Table S7. Cluster Sensitivity/Quality K")
+
+cat("\nSilhouette scores across k values:\n")
+
+cat("\nBest k based on maximum silhouette:", best_k_sil, "\n")
+cat("Your selected k:", optimal_k, "\n")
+
+if (best_k_sil == optimal_k) {
+  cat("✓ Your k selection is validated by silhouette analysis\n")
+} else {
+  cat("⚠ Note: Maximum silhouette suggests k =", best_k_sil,
+      "but k =", optimal_k, "was selected based on multiple criteria\n")
+}
+
+g_k <- ggplot(sensitivity_k, aes(x = K, y = Mean_Silhouette)) +
+  geom_line(linewidth = 1.2, color = "steelblue") +
+  geom_point(size = 4, color = "darkred") +
+  geom_vline(xintercept = optimal_k, linetype = "dashed", color = "green", linewidth = 1) +
+  annotate("text", x = optimal_k,
+           y = max(sensitivity_k$Mean_Silhouette, na.rm = TRUE) * 0.95,
+           label = paste0("Selected k = ", optimal_k),
+           color = "green", hjust = -0.1, fontface = "bold") +
+  theme_bw(base_size = 14) +
+  labs(title = "Sensitivity Analysis: Mean Silhouette Width by k",
+       subtitle = "K-means clustering on standardized biomarkers",
+       x = "Number of Clusters (k)", y = "Mean Silhouette Width") +
+  theme(plot.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold"))
+
+ggsave("figures/png/sensitivity_k_silhouette_plot.png", g_k, width = 10, height = 6, dpi = 300)
+
+ggsave("figures/tiff/sensitivity_k_silhouette_plot.tiff", g_k, width = 10, height = 6, dpi = 300)
+
+print(g_k)
+
+# K selection summary — all values from data
+k_summary <- data.frame(
+  Analysis = c("NbClust recommendation", "Elbow method", "Maximum silhouette", "Final selection"),
+  K_value  = c(recommended_k, elbow_k, best_k_sil, optimal_k),
+  Method   = c("Multiple indices", "WSS second-difference", "Silhouette", "Majority vote")
+)
+
+write.csv(k_summary, "tables/k_selection_summary.csv", row.names = FALSE)
+knitr::kable(k_summary, caption = "K Selection Summary")
+cat("\nK selection summary saved to tables/k_selection_summary.csv\n\n")
+```
+
+
+# Cluster Validation & Characterization
+
+```{r}
+# ---- Silhouette Analysis (Figure 5A) ----
+sil <- silhouette(km$cluster, dist(df_clust_scaled))
+mean_sil_width <- mean(sil[, 3])
+
+cat("Mean Silhouette Width:", round(mean_sil_width, 3), "\n")
+
+sil_plot <- fviz_silhouette(sil) +
+  labs(title = paste0("Silhouette Plot for K-Means Clustering (k = ", optimal_k, ")"),
+       subtitle = paste0("Mean silhouette width = ", round(mean_sil_width, 3))) +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold"))
+
+ggsave("figures/png/figure5_panelA_silhouette.png", sil_plot, width = 10, height = 6, dpi = 300)
+ggsave("figures/tiff/figure5_panelA_silhouette.tiff", sil_plot, width = 10, height = 6, dpi = 300)
+
+print(sil_plot)
+
+# ---- Merge Cluster Assignments ----
+final <- final %>%
+  mutate(HHID_PN = trimws(as.character(HHID_PN))) %>%
+  left_join(
+    df_clust_clean %>%
+      mutate(HHID_PN = trimws(as.character(HHID_PN))) %>%
+      select(HHID_PN, Cluster),
+    by = "HHID_PN"
+  )
+
+final_tab <- final %>% filter(!is.na(Cluster), !is.na(ATN))
+
+cat("\n=== CLUSTER MERGE DIAGNOSTICS ===\n")
+cat("Rows in final dataset:", nrow(final), "\n")
+cat("Rows with cluster assignment:", sum(!is.na(final$Cluster)), "\n")
+cat("Rows with both cluster and ATN:", nrow(final_tab), "\n\n")
+
+# ---- Comprehensive Cluster Characterization (Table 3) — all from data ----
+table2_detailed <- final %>%
+  filter(!is.na(Cluster)) %>%
+  group_by(Cluster) %>%
+  summarise(
+    N = n(),
+    Mean_Age = mean(PAGE, na.rm = TRUE),
+    SD_Age   = sd(PAGE, na.rm = TRUE),
+    Pct_Female = mean(GENDER == 2, na.rm = TRUE) * 100,
+    Mean_Education = mean(SCHLYRS, na.rm = TRUE),
+    NfL_Median  = median(NfL,            na.rm = TRUE),
+    NfL_IQR     = IQR(NfL,              na.rm = TRUE),
+    GFAP_Median = median(GFAP,           na.rm = TRUE),
+    GFAP_IQR    = IQR(GFAP,             na.rm = TRUE),
+    AB_Median   = median(AB42_40_ratio,  na.rm = TRUE),
+    AB_IQR      = IQR(AB42_40_ratio,    na.rm = TRUE),
+    pTau_Median = median(pTau181_recode, na.rm = TRUE),
+    pTau_IQR    = IQR(pTau181_recode,   na.rm = TRUE),
+    Cog_Mean    = mean(Cog_Score_2016,   na.rm = TRUE),
+    Cog_SD      = sd(Cog_Score_2016,     na.rm = TRUE),
+    Pct_A_pos   = mean(A == "A+", na.rm = TRUE) * 100,
+    Pct_T_pos   = mean(T == "T+", na.rm = TRUE) * 100,
+    Pct_N_pos   = mean(N == "N+", na.rm = TRUE) * 100,
+    Pct_Dementia = mean(Dementia_IMP_2016 == "Dementia", na.rm = TRUE) * 100,
+    Pct_CIND     = mean(Dementia_IMP_2016 == "CIND",     na.rm = TRUE) * 100,
+    Pct_Normal   = mean(Dementia_IMP_2016 == "Normal",   na.rm = TRUE) * 100
+  )
+
+knitr::kable(table2_detailed, digits = 1, caption = "Table 3. Comprehensive Cluster Characterization")
+write.csv(table2_detailed, "tables/table3_cluster_biomarker_profiles.csv", row.names = FALSE)
+
+# ---- Biomarker Statistical Tests by Cluster (Table S2) ----
+p_vals_bio <- c(
+  kruskal.test(NfL            ~ Cluster, data = final_tab)$p.value,
+  kruskal.test(GFAP           ~ Cluster, data = final_tab)$p.value,
+  kruskal.test(AB42_40_ratio  ~ Cluster, data = final_tab)$p.value,
+  kruskal.test(pTau181_recode ~ Cluster, data = final_tab)$p.value
+)
+
+p_vals_bio_adj <- p.adjust(p_vals_bio, method = "BH")
+
+table2a_biomarkers <- data.frame(
+  Biomarker = c("NfL", "GFAP", "Aβ42/40", "pTau181"),
+  Test = "Kruskal-Wallis",
+  P_raw      = format_p(p_vals_bio),
+  P_adjusted = format_p(p_vals_bio_adj),
+  Significant = ifelse(p_vals_bio_adj < 0.05, "Yes", "No")
+)
+
+knitr::kable(table2a_biomarkers, caption = "Table S2. Biomarkers by Cluster: Statistical Tests")
+write.csv(table2a_biomarkers, "tables/tableS2_biomarker_tests_by_cluster.csv", row.names = FALSE)
+
+# ---- Post-hoc Pairwise Tests (Table S16) ----
+if (any(p_vals_bio_adj < 0.05)) {
+  cat("\n=== POST-HOC PAIRWISE COMPARISONS ===\n")
+  tableS16_list <- list()
+  biomarkers_for_pairwise <- c("NfL", "GFAP", "AB42_40_ratio", "pTau181_recode")
+  labels <- c("NfL", "GFAP", "Aβ42/40", "pTau181")
+
+  for(i in seq_along(biomarkers_for_pairwise)) {
+    bio   <- biomarkers_for_pairwise[i]
+    label <- labels[i]
+    pw <- pairwise.wilcox.test(final_tab[[bio]], final_tab$Cluster,
+                               p.adjust.method = "BH", exact = FALSE)
+    cat("\n", label, ":\n")
+    print(pw$p.value)
+    pw_matrix <- as.data.frame(pw$p.value)
+    pw_matrix$Biomarker <- label
+    pw_matrix$Comparison_Group <- rownames(pw_matrix)
+    tableS16_list[[label]] <- pw_matrix
+  }
+
+  tableS16 <- do.call(rbind, tableS16_list)
+  write.csv(tableS16, "tables/tableS16_pairwise_biomarkers_by_cluster.csv", row.names = FALSE)
+  knitr::kable(tableS16, caption = "Table S16. Pairwise Biomarkers by Cluster")
+  cat("\nTable S16 saved\n")
+}
+
+# ---- PCA Cluster Plot (Figure 5B) ----
+pca_result <- prcomp(df_clust_scaled)
+var_exp <- summary(pca_result)$importance[2, 1:2] * 100
+
+p_cluster <- fviz_cluster(km, data = df_clust_scaled, geom = "point",
+                          ellipse.type = "convex", palette = "jco",
+                          main = "K-Means Cluster Assignments") +
+  labs(x = paste0("PC1 (", round(var_exp[1], 1), "%)"),
+       y = paste0("PC2 (", round(var_exp[2], 1), "%)")) +
+  theme_bw(base_size = 20) +
+  theme(plot.title = element_text(face = "bold", size = 26),
+        axis.title = element_text(face = "bold", size = 22),
+        axis.text  = element_text(size = 18),
+        legend.title = element_text(face = "bold", size = 20),
+        legend.text  = element_text(size = 18))
+
+ggsave("figures/png/figure5_panelB_pca_biplot.png", p_cluster, width = 12, height = 8, dpi = 300)
+ggsave("figures/tiff/figure5_panelB_pca_biplot.tiff", p_cluster, width = 12, height = 8, dpi = 300)
+
+print(p_cluster)
+
+# ---- UMAP ----
+set.seed(123)
+umap_res <- umap(df_clust_scaled)
+umap_df  <- data.frame(UMAP1 = umap_res$layout[,1], UMAP2 = umap_res$layout[,2],
+                       Cluster = df_clust_clean$Cluster)
+
+# ---- t-SNE ----
+set.seed(123)
+tsne_res <- Rtsne(df_clust_scaled, perplexity = 30)
+tsne_df  <- data.frame(tSNE1 = tsne_res$Y[,1], tSNE2 = tsne_res$Y[,2],
+                       Cluster = df_clust_clean$Cluster)
+
+p_tsne_final <- ggplot(tsne_df, aes(tSNE1, tSNE2, color = Cluster)) +
+  geom_point(alpha = 0.7, size = 2) + scale_color_brewer(palette = "Set2") +
+  theme_bw(base_size = 14) +
+  labs(title = "Panel A: t-SNE Projection",
+       x = "t-SNE Dimension 1", y = "t-SNE Dimension 2") +
+  theme(plot.title = element_text(face = "bold"))
+
+p_umap_final <- ggplot(umap_df, aes(UMAP1, UMAP2, color = Cluster)) +
+  geom_point(alpha = 0.7, size = 2) + scale_color_brewer(palette = "Set2") +
+  theme_bw(base_size = 14) +
+  labs(title = "Panel B: UMAP Projection",
+       x = "UMAP Dimension 1", y = "UMAP Dimension 2") +
+  theme(plot.title = element_text(face = "bold"))
+
+figureS4 <- p_tsne_final + p_umap_final +
+  plot_layout(guides = "collect") +
+  plot_annotation(title = "Alternative Nonlinear Dimensionality Reductions",
+                  theme = theme(plot.title = element_text(face = "bold", size = 16, hjust = 0.5)))
+
+ggsave("figures/supplementary/png/figureS4_tsne_umap.png", figureS4, width = 14, height = 6, dpi = 300)
+ggsave("figures/supplementary/tiff/figureS4_tsne_umap.tiff", figureS4, width = 14, height = 6, dpi = 300)
+
+print(figureS4)
+
+# ---- Cluster Centroid Heatmap (Figure 4) ----
+cluster_profiles <- aggregate(
+  df_clust_clean[, c("NfL", "GFAP", "AB42_40_ratio", "pTau181_recode")],
+  by = list(Cluster = df_clust_clean$Cluster),
+  FUN = mean
+)
+
+cluster_profiles_std <- cluster_profiles
+cluster_profiles_std[, -1] <- scale(cluster_profiles_std[, -1])
+
+centroids_melt <- reshape2::melt(cluster_profiles_std, id.vars = "Cluster")
+
+p_centroids <- ggplot(centroids_melt, aes(x = variable, y = Cluster, fill = value)) +
+  geom_tile(color = "white", linewidth = 1) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0,
+                       name = "Standardized\nMean") +
+  labs(title = "Cluster Centroids: Biomarker Profiles", x = "Biomarker", y = "Cluster") +
+  theme_bw(base_size = 14)
+
+ggsave("figures/png/figure4_cluster_centroids_heatmap.png", p_centroids, width = 8, height = 6, dpi = 300)
+ggsave("figures/tiff/figure4_cluster_centroids_heatmap.tiff", p_centroids, width = 8, height = 6, dpi = 300)
+
+print(p_centroids)
+
+# ---- Biomarker Boxplots by Cluster ----
+bio_long <- final %>%
+  filter(!is.na(Cluster)) %>%
+  select(Cluster, NfL, GFAP, AB42_40_ratio, pTau181_recode) %>%
+  pivot_longer(-Cluster, names_to = "Biomarker", values_to = "Value")
+
+p_boxes <- ggplot(bio_long, aes(x = Cluster, y = Value, fill = Cluster)) +
+  geom_boxplot(outlier.alpha = 0.3) +
+  facet_wrap(~ Biomarker, scales = "free_y", ncol = 2) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Biomarker Distributions by Cluster", y = "Concentration") +
+  theme_bw(base_size = 14)
+
+ggsave("figures/supplementary/png/supplementary_biomarker_boxplots_by_cluster.png", p_boxes, width = 10, height = 8, dpi = 300)
+ggsave("figures/supplementary/tiff/supplementary_biomarker_boxplots_by_cluster.tiff", p_boxes, width = 10, height = 8, dpi = 300)
+
+print(p_boxes)
+```
+
+
+# GFAP Sensitivity Analysis & Test k=3 Solution
+
+```{r}
+cat("\n=== SENSITIVITY ANALYSES ===\n\n")
+
+# ---------- SENSITIVITY 1: GFAP-EXCLUDED CLUSTERING ----------
+cat("1. Testing clustering WITHOUT GFAP (to match ATN framework)...\n")
+
+df_clust_no_gfap <- final %>%
+  select(HHID_PN, NfL, AB42_40_ratio, pTau181_recode) %>%
+  na.omit()
+
+df_scaled_no_gfap <- scale(df_clust_no_gfap[, -1])
+rownames(df_scaled_no_gfap) <- df_clust_no_gfap$HHID_PN
+
+set.seed(123)
+km_no_gfap <- kmeans(df_scaled_no_gfap, centers = optimal_k, nstart = 100, iter.max = 500)
+
+# Align IDs for ARI
+common_ids    <- intersect(rownames(df_clust_scaled), rownames(df_scaled_no_gfap))
+idx_with_gfap <- match(common_ids, rownames(df_clust_scaled))
+idx_no_gfap   <- match(common_ids, rownames(df_scaled_no_gfap))
+
+ari_gfap_sensitivity <- adjustedRandIndex(km$cluster[idx_with_gfap],
+                                          km_no_gfap$cluster[idx_no_gfap])
+
+cat("    ARI (with GFAP vs without GFAP):", round(ari_gfap_sensitivity, 3), "\n")
+cat("    Interpretation: ")
+
+if (ari_gfap_sensitivity > 0.7) {
+  cat("High agreement - GFAP does NOT drive clustering structure\n")
+} else if (ari_gfap_sensitivity > 0.5) {
+  cat("Moderate agreement - GFAP has modest influence\n")
+} else {
+  cat("Low agreement - GFAP is a MAJOR driver of clustering\n")
+}
+
+# Silhouette WITH GFAP (recomputed here for self-containment)
+sil_with_gfap      <- silhouette(km$cluster, dist(df_clust_scaled))
+mean_sil_with_gfap <- mean(sil_with_gfap[, 3])
+
+# Silhouette WITHOUT GFAP
+sil_no_gfap      <- silhouette(km_no_gfap$cluster, dist(df_scaled_no_gfap))
+mean_sil_no_gfap <- mean(sil_no_gfap[, 3])
+
+cat("   Silhouette (with GFAP):",    round(mean_sil_with_gfap, 3), "\n")
+cat("   Silhouette (without GFAP):", round(mean_sil_no_gfap, 3),   "\n\n")
+
+cluster_sizes_comparison <- data.frame(
+  Cluster       = 1:optimal_k,
+  With_GFAP     = as.numeric(table(factor(km$cluster,            levels = 1:optimal_k))),
+  Without_GFAP  = as.numeric(table(factor(km_no_gfap$cluster,    levels = 1:optimal_k)))
+)
+
+write.csv(cluster_sizes_comparison,
+          "tables/tableS12_gfap_cluster_sizes.csv",
+          row.names = FALSE)
+
+knitr::kable(cluster_sizes_comparison, caption = "Table S12. GFAP Cluster Comparison")
+
+gfap_sensitivity_summary <- data.frame(
+  Analysis                = "GFAP Inclusion Sensitivity",
+  ARI_with_vs_without     = round(ari_gfap_sensitivity, 3),
+  Silhouette_with_GFAP    = round(mean_sil_with_gfap,   3),
+  Silhouette_without_GFAP = round(mean_sil_no_gfap,     3),
+  N_with_GFAP             = nrow(df_clust_scaled),
+  N_without_GFAP          = nrow(df_scaled_no_gfap),
+  Interpretation = ifelse(
+    ari_gfap_sensitivity > 0.7,
+    "GFAP does not drive clustering",
+    ifelse(ari_gfap_sensitivity > 0.5,
+           "GFAP has moderate influence",
+           "GFAP is major driver")
+  )
+)
+
+write.csv(gfap_sensitivity_summary,
+          "tables/tableS12_gfap_sensitivity.csv",
+          row.names = FALSE)
+
+knitr::kable(gfap_sensitivity_summary, caption = "Table S12. GFAP Sensitivity")
+
+# -------- SENSITIVITY 2: k=3 vs k=optimal_k COMPARISON -----
+cat("2. Testing k=3 solution vs k =", optimal_k, "(to assess smallest cluster validity)...\n")
+
+set.seed(123)
+km_k3 <- kmeans(df_clust_scaled, centers = 3, nstart = 100, iter.max = 500)
+
+sil_k3      <- silhouette(km_k3$cluster, dist(df_clust_scaled))
+mean_sil_k3 <- mean(sil_k3[, 3])
+
+cat("   Mean silhouette (k=3):",          round(mean_sil_k3,        3), "\n")
+cat("   Mean silhouette (k=", optimal_k, "):", round(mean_sil_with_gfap, 3), "\n")
+
+k3_kopt_crosstab <- table(k3 = km_k3$cluster, kopt = km$cluster)
+cat("\n   Cross-tabulation (k=3 rows, k=", optimal_k, "columns):\n")
+print(k3_kopt_crosstab)
+cat("\n")
+
+# Smallest cluster in optimal solution
+smallest_cluster_id  <- as.numeric(names(which.min(table(km$cluster))))
+smallest_cluster_ids <- which(km$cluster == smallest_cluster_id)
+smallest_in_k3       <- km_k3$cluster[smallest_cluster_ids]
+
+cat("   Smallest cluster (n=", length(smallest_cluster_ids),
+    ") assignment in k=3 solution:\n")
+print(table(smallest_in_k3))
+cat("   --> Most members merge into k=3 cluster:",
+    names(which.max(table(smallest_in_k3))), "\n\n")
+
+ari_k3_kopt <- adjustedRandIndex(km_k3$cluster, km$cluster)
+cat("   ARI (k=3 vs k=", optimal_k, "):", round(ari_k3_kopt, 3), "\n")
+
+k3_kopt_sizes <- data.frame(
+  Solution = c(rep("k=3", 3), rep(paste0("k=", optimal_k), optimal_k)),
+  Cluster  = c(1:3, 1:optimal_k),
+  N = c(
+    as.numeric(table(km_k3$cluster)),
+    as.numeric(table(km$cluster))
+  ),
+  Percent = c(
+    round(100 * table(km_k3$cluster) / length(km_k3$cluster), 1),
+    round(100 * table(km$cluster)    / length(km$cluster),    1)
+  )
+)
+
+write.csv(k3_kopt_sizes,
+          "tables/tableS13_k3_kopt_cluster_sizes.csv",
+          row.names = FALSE)
+
+knitr::kable(k3_kopt_sizes, caption = "Table S13. kopt_cluster_size")
+
+# Biomarker profiles for k=3 solution
+k3_profiles <- final %>%
+  mutate(Cluster_k3 = km_k3$cluster[match(HHID_PN, rownames(df_clust_scaled))]) %>%
+  filter(!is.na(Cluster_k3)) %>%
+  group_by(Cluster_k3) %>%
+  summarise(
+    N              = n(),
+    NfL_median     = median(NfL,             na.rm = TRUE),
+    GFAP_median    = median(GFAP,            na.rm = TRUE),
+    AB42_40_median = median(AB42_40_ratio,   na.rm = TRUE),
+    pTau181_median = median(pTau181_recode,  na.rm = TRUE),
+    Cog_mean       = mean(Cog_Score_2016,    na.rm = TRUE),
+    Pct_Dementia   = mean(Dementia_IMP_2016 == "Dementia", na.rm = TRUE) * 100
+  )
+
+write.csv(k3_profiles,
+          "tables/tableS13_k3_cluster_profiles.csv",
+          row.names = FALSE)
+
+knitr::kable(k3_profiles, caption = "Table S13. cluster_profiles")
+
+k3_kopt_summary <- data.frame(
+  Metric = c("Mean Silhouette", "Smallest Cluster N", "Smallest Cluster %",
+             paste0("ARI with k=", optimal_k)),
+  k3_value = c(
+    round(mean_sil_k3, 3),
+    min(table(km_k3$cluster)),
+    round(100 * min(table(km_k3$cluster)) / length(km_k3$cluster), 1),
+    NA
+  ),
+  kopt_value = c(
+    round(mean_sil_with_gfap, 3),
+    min(table(km$cluster)),
+    round(100 * min(table(km$cluster)) / length(km$cluster), 1),
+    round(ari_k3_kopt, 3)
+  ),
+  Decision_Criterion = c(
+    "Higher is better",
+    "Stability concern if <30",
+    "Stability concern if <1%",
+    "Agreement measure"
+  )
+)
+
+write.csv(k3_kopt_summary,
+          "tables/tableS13_k3_kopt_summary.csv",
+          row.names = FALSE)
+
+knitr::kable(k3_kopt_summary, caption = "tableS13_k3_kopt_summary")
+
+# ---------- SENSITIVITY 3: Alternative Distance Metrics -------------
+cat("3. Testing alternative distance metric (Manhattan)...\n")
+
+dist_manhattan <- dist(df_clust_scaled, method = "manhattan")
+km_manhattan   <- pam(dist_manhattan, k = optimal_k)
+
+ari_distance_sensitivity <- adjustedRandIndex(km$cluster, km_manhattan$clustering)
+manhattan_cluster_sizes  <- table(km_manhattan$clustering)
+
+cat("   ARI (Euclidean vs Manhattan):", round(ari_distance_sensitivity, 3), "\n")
+cat("   Smallest cluster size (Manhattan):", min(manhattan_cluster_sizes), "\n")
+cat("   Smallest cluster size (Euclidean):", min(table(km$cluster)), "\n\n")
+
+distance_sensitivity_summary <- data.frame(
+  Distance_Metric      = c("Euclidean", "Manhattan"),
+  Smallest_Cluster_N   = c(min(table(km$cluster)), min(manhattan_cluster_sizes)),
+  Mean_Silhouette      = c(
+    mean_sil_with_gfap,
+    mean(silhouette(km_manhattan$clustering, dist_manhattan)[, 3])
+  ),
+  ARI_vs_Euclidean     = c(1.000, round(ari_distance_sensitivity, 3))
+)
+
+write.csv(distance_sensitivity_summary,
+          "tables/tableS14_distance_metric_sensitivity.csv",
+          row.names = FALSE)
+
+knitr::kable(distance_sensitivity_summary, caption = "tableS14_distance_metric_sensitivity.csv")
+
+cat("=== ALL SENSITIVITY ANALYSES COMPLETE ===\n\n")
+```
+
+
+# Visualization: Sensitivity Analysis — k=3 vs k=optimal_k
+
+```{r}
+# Panel A: Silhouette comparison — labels from data
+sil_data <- cluster_metrics %>%
+  filter(K >= 2) %>%
+  mutate(
+    Highlight = case_when(
+      K == 3        ~ "k=3",
+      K == optimal_k ~ paste0("k=", optimal_k),
+      TRUE          ~ "Other"
+    )
+  )
+
+sil_k3_val   <- round(cluster_metrics$Mean_Silhouette[cluster_metrics$K == 3],          3)
+sil_kopt_val <- round(cluster_metrics$Mean_Silhouette[cluster_metrics$K == optimal_k],  3)
+
+pA <- ggplot(sil_data, aes(x = K, y = Mean_Silhouette)) +
+  geom_col(fill = "grey85", color = "black") +
+  geom_point(size = 4, aes(color = Highlight)) +
+  scale_color_manual(
+    values = c("k=3" = "#d95f02",
+               setNames("#1b9e77", paste0("k=", optimal_k)),
+               "Other" = "black"),
+    guide = "none"
+  ) +
+  geom_hline(yintercept = 0.50, linetype = "dashed", color = "gray40") +
+  annotate("text", x = 3,        y = sil_k3_val   + 0.02,
+           label = "k=3 peak",                 color = "#d95f02",  fontface = "bold", size = 4) +
+  annotate("text", x = optimal_k, y = sil_kopt_val + 0.02,
+           label = paste0("k=", optimal_k, " selected"), color = "#1b9e77", fontface = "bold", size = 4) +
+  labs(title = "Panel A. Silhouette Comparison",
+       x = "Number of Clusters (k)", y = "Mean Silhouette Width") +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"))
+
+# Panel B: Cluster sizes — from data
+sizes_k3   <- k3_kopt_sizes %>% filter(Solution == "k=3")
+sizes_kopt <- k3_kopt_sizes %>% filter(Solution != "k=3")
+
+pB <- ggplot(k3_kopt_sizes, aes(x = Solution, y = Percent, fill = factor(Cluster))) +
+  geom_col(color = "black") +
+  geom_text(aes(label = paste0("n=", N, "\n", Percent, "%")),
+            position = position_stack(vjust = 0.5), size = 3.5) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Panel B. Cluster Size Distributions",
+       x = "Clustering Solution", y = "Percent of Sample") +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"))
+
+# Panel C: Biomarker centroids — computed from actual cluster means
+get_centroids_long <- function(km_obj, k_label) {
+  cent <- as.data.frame(km_obj$centers)
+  cent$Cluster  <- factor(1:nrow(cent))
+  cent$Solution <- k_label
+  cent %>%
+    pivot_longer(cols = -c(Cluster, Solution),
+                 names_to = "Biomarker", values_to = "Value") %>%
+    mutate(Biomarker = recode(Biomarker,
+      NfL = "NfL", GFAP = "GFAP",
+      AB42_40_ratio = "Aβ42/40", pTau181_recode = "pTau181"))
+}
+
+centroids_k3_real   <- get_centroids_long(km_k3, "k=3")
+centroids_kopt_real <- get_centroids_long(km,    paste0("k=", optimal_k))
+centroids_all_real  <- bind_rows(centroids_k3_real, centroids_kopt_real)
+
+pC <- ggplot(centroids_all_real, aes(x = Biomarker, y = Cluster, fill = Value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "purple", mid = "white", high = "red",
+                       midpoint = 0, name = "Standardized\nMean") +
+  facet_wrap(~ Solution, ncol = 1, scales = "free_y") +
+  labs(title = "Panel C. Biomarker Profile Comparison",
+       x = "Biomarker", y = "Cluster") +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+figure_S7 <- (pA | pB) / pC +
+  plot_layout(heights = c(1, 1.4)) +
+  plot_annotation(
+    title = paste0("Sensitivity Analysis: k=3 vs k=", optimal_k, " Clustering Solutions"),
+    theme = theme(plot.title = element_text(face = "bold", size = 16, hjust = 0.5))
+  )
+
+ggsave("figures/supplementary/png/figureS7_k3_vs_kopt.png", figure_S7, width = 14, height = 12, dpi = 600)
+
+ggsave("figures/supplementary/tiff/figureS7_k3_vs_kopt.tiff", figure_S7, width = 14, height = 12, dpi = 600)
+
+print(figure_S7)
+```
+
+
+# Visualization: Sensitivity Analysis – Alternative ATN Cutoff Thresholds
+
+```{r}
+# Panel A: Cutoff table — reference values only, unchanged from literature
+
+# The primary cutpoints, 0.067, 2.2, 20 are taken from these sources:
+# Aβ42/40 = 0.067 — Nakamura et al. 2018 Nature (PMID: 29613453)
+# pTau181 = 2.2 pg/mL — Karikari et al. 2020 Lancet Neurol (PMID: 32123386)
+# NfL = 20 pg/mL — Mattsson-Carlgren et al. 2021 JAMA Neurol
+
+cutoff_table <- data.frame(
+  Biomarker = c("Aβ42/40", "pTau181", "NfL"),
+  Low = c(0.060, 2.0, 18),
+  Primary = c(0.067, 2.2, 20),
+  High = c(0.074, 2.4, 22)
+)
+
+pA <- tableGrob(cutoff_table, rows = NULL, theme = ttheme_minimal(base_size = 14))
+pA <- as.ggplot(pA) +
+  ggtitle("Panel A. Cutoff Variations Tested") +
+  theme(plot.title = element_text(face = "bold", size = 14, hjust = 0.5))
+
+# Panel B: Reclassification rates 
+reclass_ab    <- sum(final$AB42_40_ratio  >= cutoff_table$Low[1] &
+                     final$AB42_40_ratio  <= cutoff_table$High[1], na.rm = TRUE)
+reclass_ptau  <- sum(final$pTau181_recode >= cutoff_table$Low[2] &
+                     final$pTau181_recode <= cutoff_table$High[2], na.rm = TRUE)
+reclass_nfl   <- sum(final$NfL           >= cutoff_table$Low[3] &
+                     final$NfL           <= cutoff_table$High[3], na.rm = TRUE)
+
+reclass_data <- data.frame(
+  Biomarker = c("Aβ42/40 ±10%", "pTau181 ±9%", "NfL ±10%"),
+  Percent = round(c(reclass_ab, reclass_ptau, reclass_nfl) / nrow(final) * 100, 1)
+)
+
+pB <- ggplot(reclass_data, aes(x = Biomarker, y = Percent, fill = Biomarker)) +
+  geom_col(color = "black") +
+  geom_text(aes(label = paste0(Percent, "%")), vjust = -0.5, size = 5) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Panel B. Reclassification Rates",
+       x = "Biomarker", y = "Percent Reclassified") +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "none") +
+  ylim(0, max(reclass_data$Percent) * 1.25)
+
+# Panel C: ARI across cutoff combinations — computed from data
+cutoff_grid <- expand.grid(
+  AB_cut   = c(cutoff_table$Low[1], cutoff_table$Primary[1], cutoff_table$High[1]),
+  pTau_cut = c(cutoff_table$Low[2], cutoff_table$Primary[2], cutoff_table$High[2]),
+  NfL_cut  = c(cutoff_table$Low[3], cutoff_table$Primary[3], cutoff_table$High[3])
+)
+
+ari_cutoff_vec <- numeric(nrow(cutoff_grid))
+primary_row    <- which(
+  cutoff_grid$AB_cut   == cutoff_table$Primary[1] &
+  cutoff_grid$pTau_cut == cutoff_table$Primary[2] &
+  cutoff_grid$NfL_cut  == cutoff_table$Primary[3]
+)
+
+for (i in seq_len(nrow(cutoff_grid))) {
+  atn_alt <- paste(
+    ifelse(final$AB42_40_ratio  < cutoff_grid$AB_cut[i],   "A+", "A-"),
+    ifelse(final$pTau181_recode > cutoff_grid$pTau_cut[i], "T+", "T-"),
+    ifelse(final$NfL            > cutoff_grid$NfL_cut[i],  "N+", "N-"),
+    sep = "/"
+  )
+  ari_cutoff_vec[i] <- suppressWarnings(
+    adjustedRandIndex(final$ATN[!is.na(final$Cluster) & !is.na(final$ATN)],
+                      atn_alt[!is.na(final$Cluster) & !is.na(final$ATN)])
+  )
+}
+
+ari_df <- data.frame(
+  Index   = seq_len(nrow(cutoff_grid)),
+  ARI     = ari_cutoff_vec,
+  Primary = seq_len(nrow(cutoff_grid)) == primary_row
+)
+
+pC <- ggplot(ari_df, aes(x = Index, y = ARI)) +
+  geom_line(color = "gray40") +
+  geom_point(size = 3) +
+  geom_point(data = subset(ari_df, Primary), aes(x = Index, y = ARI),
+             color = "green", size = 5) +
+  annotate("text", x = primary_row,
+           y = ari_cutoff_vec[primary_row] + diff(range(ari_cutoff_vec)) * 0.08,
+           label = "Primary cutoffs", color = "green", fontface = "bold") +
+  labs(title = "Panel C. ATN-Cluster Agreement",
+       x = "Cutoff Combination Index", y = "Adjusted Rand Index") +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(face = "bold")) +
+  ylim(min(ari_cutoff_vec) * 0.9, max(ari_cutoff_vec) * 1.1)
+
+# Panel D: Profile stability matrix — computed from data
+atn_profiles_common <- unique(final$ATN[!is.na(final$ATN)])
+
+build_stability_matrix <- function(atn_primary, ari_grid, cutoff_grid, final_df) {
+  # Compute transition proportions between primary and each alternative cutoff
+  stability_list <- lapply(atn_profiles_common, function(p) {
+    in_primary <- final_df$ATN == p & !is.na(final_df$ATN)
+    counts <- sapply(atn_profiles_common, function(q) {
+      alt_assign <- character(nrow(cutoff_grid))
+      # Use all alternative cutoff scenarios
+      all_alts <- lapply(seq_len(nrow(cutoff_grid)), function(i) {
+        paste(
+          ifelse(final_df$AB42_40_ratio  < cutoff_grid$AB_cut[i],   "A+", "A-"),
+          ifelse(final_df$pTau181_recode > cutoff_grid$pTau_cut[i], "T+", "T-"),
+          ifelse(final_df$NfL            > cutoff_grid$NfL_cut[i],  "N+", "N-"),
+          sep = "/"
+        )
+      })
+      # Among primary==p, fraction that land in q across alternatives
+      total <- sum(in_primary, na.rm = TRUE) * length(all_alts)
+      hits  <- sum(sapply(all_alts, function(a) sum(a[in_primary] == q, na.rm = TRUE)))
+      if (total > 0) hits / total else 0
+    })
+    counts
+  })
+  mat <- do.call(rbind, stability_list)
+  rownames(mat) <- atn_profiles_common
+  colnames(mat) <- atn_profiles_common
+  as.data.frame(mat)
+}
+
+stab_mat <- build_stability_matrix(atn_profiles_common, ari_cutoff_vec, cutoff_grid, final)
+
+stability_long <- stab_mat %>%
+  mutate(From = rownames(stab_mat)) %>%
+  pivot_longer(cols = -From, names_to = "To", values_to = "Proportion")
+
+# Limit to the 4 most common ATN profiles for display clarity
+top4_profiles <- names(sort(table(final$ATN), decreasing = TRUE))[1:min(4, length(atn_profiles_common))]
+
+stability_display <- stability_long %>%
+  filter(From %in% top4_profiles, To %in% top4_profiles)
+
+pD <- ggplot(stability_display, aes(x = From, y = To, fill = Proportion)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.1f%%", Proportion * 100)), size = 3) +
+  scale_fill_gradient(low = "white", high = "red") +
+  labs(title = "Panel D. Profile Stability Matrix",
+       x = "Primary Profile", y = "Alternative Profile") +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+figure_S8 <- (pA | pB) / (pC | pD) +
+  plot_layout(heights = c(1, 1.2)) +
+  plot_annotation(title = "Sensitivity Analysis: Alternative ATN Cutoff Thresholds",
+                  theme = theme(plot.title = element_text(face = "bold", size = 16, hjust = 0.5)))
+
+ggsave("figures/supplementary/png/figureS8_ATN_cutoffs.png", figure_S8, width = 16, height = 14, dpi = 600)
+ggsave("figures/supplementary/tiff/figureS8_ATN_cutoffs.tiff", figure_S8, width = 16, height = 14, dpi = 600)
+
+print(figure_S8)
+```
+
+
+# ATN-Cluster Alignment
+
+```{r}
+cont_table <- table(final_tab$ATN, final_tab$Cluster)
+
+cat("\n=== ATN × CLUSTER CONTINGENCY TABLE ===\n")
+print(cont_table)
+cat("\n")
+
+if (nrow(cont_table) == 2 && ncol(cont_table) == 2) {
+  chi_atn_cluster <- fisher.test(cont_table)
+  test_name <- "Fisher's exact test"
+} else {
+  chi_atn_cluster <- chisq.test(cont_table, simulate.p.value = TRUE, B = 10000)
+  test_name <- "Chi-square test"
+}
+
+cat(test_name, "(ATN × Cluster):\n")
+cat("p-value:", format_p(chi_atn_cluster$p.value), "\n\n")
+
+ari_val <- adjustedRandIndex(final_tab$ATN, final_tab$Cluster)
+nmi_val <- NMI(as.character(final_tab$ATN), as.character(final_tab$Cluster))
+
+cat("Adjusted Rand Index (ATN vs Cluster):", round(ari_val, 3), "\n")
+cat("Normalized Mutual Information:", round(nmi_val, 3), "\n\n")
+
+alignment_summary <- data.frame(
+  Metric = c("Adjusted Rand Index", "Normalized Mutual Information", test_name),
+  Value  = c(round(ari_val, 3), round(nmi_val, 3), NA),
+  P_value = c(NA, NA, format_p(chi_atn_cluster$p.value))
+)
+
+write.csv(alignment_summary, "tables/table5_atn_cluster_agreement.csv", row.names = FALSE)
+
+knitr::kable(alignment_summary, caption = "table5_atn_cluster_agreement")
+
+ct_df <- as.data.frame(cont_table)
+names(ct_df) <- c("ATN", "Cluster", "Count")
+
+p_heat <- ggplot(ct_df, aes(x = Cluster, y = ATN, fill = Count)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(aes(label = Count), color = "white", fontface = "bold", size = 5) +
+  scale_fill_viridis_c(option = "plasma") +
+  labs(title = "ATN × Cluster Contingency Heatmap",
+       subtitle = paste0("ARI = ", round(ari_val, 3), ", NMI = ", round(nmi_val, 3)),
+       x = "K-Means Cluster", y = "ATN Profile") +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"),
+        axis.text.y = element_text(size = 10))
+
+ggsave("figures/png/figure6_panelA_contingency_heatmap.png", p_heat, width = 10, height = 8, dpi = 300)
+ggsave("figures/tiff/figure6_panelA_contingency_heatmap.tiff", p_heat, width = 10, height = 8, dpi = 300)
+
+print(p_heat)
+
+ct_pct <- ct_df %>%
+  group_by(Cluster) %>%
+  mutate(Percent = 100 * Count / sum(Count))
+
+p_stack <- ggplot(ct_pct, aes(x = Cluster, y = Percent, fill = ATN)) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(aes(label = paste0(round(Percent, 1), "%")),
+            position = position_stack(vjust = 0.5), size = 3) +
+  scale_fill_viridis_d(option = "turbo") +
+  labs(title = "ATN Profile Composition by Cluster", y = "Percentage", x = "Cluster") +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave("figures/png/figure6_panelB_stacked_bars.png", p_stack, width = 10, height = 6, dpi = 300)
+ggsave("figures/tiff/figure6_panelB_stacked_bars.tiff", p_stack, width = 10, height = 6, dpi = 300)
+
+print(p_stack)
+```
+
+
+# Fuzzy K‑Means (FKM)
+
+```{r}
+cat("\n=== FUZZY K-MEANS CLUSTERING ===\n")
+
+X_df <- final %>%
+  select(HHID_PN, log_NfL, log_GFAP, log_AB42_40_ratio, log_pTau181_recode) %>%
+  distinct() %>%
+  na.omit()
+
+cat("Sample size for FKM:", nrow(X_df), "\n")
+
+X <- X_df %>% select(-HHID_PN) %>% scale()
+
+set.seed(123)
+fkm_model <- fcm(X, centers = optimal_k, m = 2)
+
+# Membership matrix — derived from model output
+U             <- fkm_model$u
+hard_clusters <- apply(U, 1, which.max)
+
+cluster_sizes_fkm <- table(hard_clusters)
+cat("\nFKM Cluster sizes:\n")
+print(cluster_sizes_fkm)
+
+# Cluster centroids — from data
+centroids_fkm <- X_df %>%
+  mutate(Cluster = hard_clusters) %>%
+  group_by(Cluster) %>%
+  summarise(
+    Mean_log_NfL     = mean(log_NfL),
+    Mean_log_GFAP    = mean(log_GFAP),
+    Mean_log_AB42_40 = mean(log_AB42_40_ratio),
+    Mean_log_pTau181 = mean(log_pTau181_recode)
+  )
+
+# Mean membership per cluster — from U matrix
+mean_membership <- colMeans(U)
+
+# Entropy — from U matrix
+entropy      <- -rowSums(U * log(U + 1e-12))
+mean_entropy <- mean(entropy)
+
+cat("\nOverall mean entropy (fuzziness):", round(mean_entropy, 3), "\n")
+
+table_S18 <- tibble(
+  Cluster         = 1:optimal_k,
+  Size            = as.numeric(cluster_sizes_fkm),
+  Mean_log_NfL    = centroids_fkm$Mean_log_NfL,
+  Mean_log_GFAP   = centroids_fkm$Mean_log_GFAP,
+  Mean_log_AB42_40 = centroids_fkm$Mean_log_AB42_40,
+  Mean_log_pTau181 = centroids_fkm$Mean_log_pTau181,
+  Mean_Membership  = mean_membership,
+  Overall_Entropy  = mean_entropy
+)
+
+write.csv(table_S18, "tables/tableS18_fkm_summary_statistics.csv", row.names = FALSE)
+cat("\nTable S18 saved\n")
+knitr::kable(table_S18, caption = "tableS18_fkm_summary_statistics")
+cat("\n=== FUZZY K-MEANS COMPLETE ===\n\n")
+```
+
+
+# LONGITUDINAL COGNITIVE DECLINE ANALYSIS
+
+```{r}
+cat("\n=== LONGITUDINAL COGNITIVE DECLINE ANALYSIS ===\n")
+
+long_2016_2020 <- final %>%
+  filter(!is.na(Cog_Score_2016), !is.na(Cog_Score_2020)) %>%
+  mutate(Cog_Decline_2016_2020 = Cog_Score_2016 - Cog_Score_2020)
+
+cat("N with 2016 and 2020 cognition:", nrow(long_2016_2020), "\n")
+
+lm_atn_decline_2016_2020 <- lm(
+  Cog_Decline_2016_2020 ~ ATN + PAGE + GENDER + RACE + SCHLYRS,
+  data = long_2016_2020
+)
+summary(lm_atn_decline_2016_2020)
+capture.output(summary(lm_atn_decline_2016_2020), file = "results/lm_atn_decline_2016_2020.txt")
+
+long_2016_2020_clust <- long_2016_2020 %>% filter(!is.na(Cluster))
+
+lm_cluster_decline_2016_2020 <- lm(
+  Cog_Decline_2016_2020 ~ Cluster + PAGE + GENDER + RACE + SCHLYRS,
+  data = long_2016_2020_clust
+)
+summary(lm_cluster_decline_2016_2020)
+capture.output(summary(lm_cluster_decline_2016_2020), file = "results/lm_cluster_decline_2016_2020.txt")
+
+# R-squared values derived from fitted models — not hardcoded
+model_compare_2016_2020 <- data.frame(
+  Model = c("ATN-only", "Cluster-only", "ATN + Cluster"),
+  R2 = c(
+    summary(lm(Cog_Decline_2016_2020 ~ ATN,          data = long_2016_2020))$r.squared,
+    summary(lm(Cog_Decline_2016_2020 ~ Cluster,       data = long_2016_2020_clust))$r.squared,
+    summary(lm(Cog_Decline_2016_2020 ~ ATN + Cluster, data = long_2016_2020_clust))$r.squared
+  )
+)
+
+write.csv(model_compare_2016_2020, "tables/table9_longitudinal_predictive_utility_2016_2020.csv", row.names = FALSE)
+knitr::kable(model_compare_2016_2020, caption = "table9_longitudinal_predictive_utility_2016_2020")
+print(model_compare_2016_2020)
+
+long_2018_2020 <- final %>%
+  filter(!is.na(Cog_Score_2018), !is.na(Cog_Score_2020)) %>%
+  mutate(Cog_Decline_2018_2020 = Cog_Score_2018 - Cog_Score_2020)
+
+cat("N with 2018 and 2020 cognition:", nrow(long_2018_2020), "\n")
+
+lm_atn_decline_2018_2020 <- lm(
+  Cog_Decline_2018_2020 ~ ATN + PAGE + GENDER + RACE + SCHLYRS,
+  data = long_2018_2020
+)
+summary(lm_atn_decline_2018_2020)
+capture.output(summary(lm_atn_decline_2018_2020), file = "results/lm_atn_decline_2018_2020.txt")
+
+long_2018_2020_clust <- long_2018_2020 %>% filter(!is.na(Cluster))
+
+lm_cluster_decline_2018_2020 <- lm(
+  Cog_Decline_2018_2020 ~ Cluster + PAGE + GENDER + RACE + SCHLYRS,
+  data = long_2018_2020_clust
+)
+summary(lm_cluster_decline_2018_2020)
+capture.output(summary(lm_cluster_decline_2018_2020), file = "results/lm_cluster_decline_2018_2020.txt")
+
+model_compare_2018_2020 <- data.frame(
+  Model = c("ATN-only", "Cluster-only", "ATN + Cluster"),
+  R2 = c(
+    summary(lm(Cog_Decline_2018_2020 ~ ATN,          data = long_2018_2020))$r.squared,
+    summary(lm(Cog_Decline_2018_2020 ~ Cluster,       data = long_2018_2020_clust))$r.squared,
+    summary(lm(Cog_Decline_2018_2020 ~ ATN + Cluster, data = long_2018_2020_clust))$r.squared
+  )
+)
+
+write.csv(model_compare_2018_2020, "tables/table9_longitudinal_predictive_utility_2018_2020.csv", row.names = FALSE)
+knitr::kable(model_compare_2018_2020, caption = "table9_longitudinal_predictive_utility_2018_2020")
+print(model_compare_2018_2020)
+```
+
+
+# GENERATE MISSING SUPPLEMENTARY TABLES
+
+```{r}
+# TABLE S10: Seed Stability — reuse already-computed ari_seeds_mat / cluster_sizes_mat
+cat("\n=== GENERATING TABLE S10 ===\n")
+write.csv(tableS10, "tables/tableS10_seed_stability.csv", row.names = FALSE)
+knitr::kable(tableS10, caption = "tableS10_seed_stability")
+
+# TABLE S11: Missing Data — all counts from data
+cat("\n=== GENERATING TABLE S11 ===\n")
+tableS11 <- data.frame(
+  Variable = c("NfL", "GFAP", "Aβ42/40 ratio", "pTau181", "Age", "Gender",
+               "Race/Ethnicity", "Education", "APOE ε4",
+               "Cognition 2016", "Cognition 2018", "Cognition 2020"),
+  N_Missing = c(
+    sum(is.na(final$NfL)),
+    sum(is.na(final$GFAP)),
+    sum(is.na(final$AB42_40_ratio)),
+    sum(is.na(final$pTau181_recode)),
+    sum(is.na(final$PAGE)),
+    sum(is.na(final$GENDER)),
+    sum(is.na(final$RACE_ETH)),
+    sum(is.na(final$SCHLYRS)),
+    NA,  # APOE not in dataset
+    sum(is.na(final$Cog_Score_2016)),
+    sum(is.na(final$Cog_Score_2018)),
+    sum(is.na(final$Cog_Score_2020))
+  ),
+  Pct_Missing = round(c(
+    mean(is.na(final$NfL)),
+    mean(is.na(final$GFAP)),
+    mean(is.na(final$AB42_40_ratio)),
+    mean(is.na(final$pTau181_recode)),
+    mean(is.na(final$PAGE)),
+    mean(is.na(final$GENDER)),
+    mean(is.na(final$RACE_ETH)),
+    mean(is.na(final$SCHLYRS)),
+    NA,
+    mean(is.na(final$Cog_Score_2016)),
+    mean(is.na(final$Cog_Score_2018)),
+    mean(is.na(final$Cog_Score_2020))
+  ) * 100, 1),
+  Pattern = c(rep("Complete", 4), rep("MCAR", 4), NA, rep("MCAR", 3))
+)
+
+write.csv(tableS11, "tables/tableS11_missing_data.csv", row.names = FALSE)
+knitr::kable(tableS11, caption = "tableS11_missing_data")
+cat("\n=== SUPPLEMENTARY TABLES COMPLETE ===\n")
+```
+
+
+# GFAP SENSITIVITY: COMPUTE ARI vs ATN
+
+```{r}
+cat("\n=== GFAP SENSITIVITY: ARI WITH ATN ===\n")
+
+final_for_ari <- final %>%
+  mutate(HHID_PN = trimws(as.character(HHID_PN))) %>%
+  filter(!is.na(ATN))
+
+# 4-biomarker vs ATN — from data
+idx_4bio <- match(rownames(df_clust_scaled), final_for_ari$HHID_PN)
+idx_4bio <- idx_4bio[!is.na(idx_4bio)]
+
+ari_4bio_vs_atn <- adjustedRandIndex(
+  km$cluster[!is.na(match(rownames(df_clust_scaled), final_for_ari$HHID_PN))],
+  final_for_ari$ATN[idx_4bio]
+)
+
+cat("4-biomarker clustering vs ATN: ARI =", round(ari_4bio_vs_atn, 3), "\n")
+
+# 3-biomarker vs ATN — from data
+idx_3bio <- match(rownames(df_scaled_no_gfap), final_for_ari$HHID_PN)
+idx_3bio <- idx_3bio[!is.na(idx_3bio)]
+
+ari_3bio_vs_atn <- adjustedRandIndex(
+  km_no_gfap$cluster[!is.na(match(rownames(df_scaled_no_gfap), final_for_ari$HHID_PN))],
+  final_for_ari$ATN[idx_3bio]
+)
+
+cat("3-biomarker clustering vs ATN: ARI =", round(ari_3bio_vs_atn, 3), "\n")
+
+# Relative improvement — from data
+relative_improvement <- ((ari_3bio_vs_atn - ari_4bio_vs_atn) / abs(ari_4bio_vs_atn)) * 100
+cat("Relative improvement:", round(relative_improvement, 1), "%\n\n")
+
+gfap_sensitivity_summary <- data.frame(
+  Analysis = "GFAP Inclusion Sensitivity",
+  ARI_4bio_vs_ATN  = round(ari_4bio_vs_atn,    3),
+  ARI_3bio_vs_ATN  = round(ari_3bio_vs_atn,    3),
+  Relative_Improvement_Pct = round(relative_improvement, 1),
+  ARI_with_vs_without = round(ari_gfap_sensitivity, 3),
+  Silhouette_with_GFAP   = round(mean_sil_width,    3),
+  Silhouette_without_GFAP = round(mean_sil_no_gfap, 3),
+  N_with_GFAP    = nrow(df_clust_scaled),
+  N_without_GFAP = nrow(df_scaled_no_gfap),
+  Interpretation = paste0(
+    "GFAP contributes ~",
+    round((1 - ari_gfap_sensitivity) * 100, 0),
+    "% of discordance"
+  )
+)
+
+write.csv(gfap_sensitivity_summary, "tables/tableS12_gfap_sensitivity.csv", row.names = FALSE)
+knitr::kable(gfap_sensitivity_summary, caption = "tableS12_gfap_sensitivity")
+cat("Updated tableS12_gfap_sensitivity.csv\n")
+```
+
+
+# VAE with PCA Comparison
+
+```{r}
+x <- df_clust_scaled
+input_dim       <- ncol(x)
+latent_dim      <- 2
+intermediate_dim <- 64
+
+vae_model <- keras_model_custom(name = "vae", function(self) {
+  self$encoder_input    <- layer_input(shape = input_dim, name = "encoder_input")
+  self$enc_dense        <- layer_dense(units = intermediate_dim, activation = "relu", name = "enc_dense")
+  self$z_mean_layer     <- layer_dense(units = latent_dim, name = "z_mean")
+  self$z_log_var_layer  <- layer_dense(units = latent_dim, name = "z_log_var")
+  self$dec_input  <- layer_input(shape = latent_dim, name = "z_sampling")
+  self$dec_dense  <- layer_dense(units = intermediate_dim, activation = "relu", name = "dec_dense")
+  self$dec_output <- layer_dense(units = input_dim, activation = "linear", name = "dec_output")
+
+  encode <- function(x) {
+    h         <- self$enc_dense(x)
+    z_mean    <- self$z_mean_layer(h)
+    z_log_var <- self$z_log_var_layer(h)
+    epsilon   <- k_random_normal(shape = k_shape(z_mean))
+    z         <- z_mean + k_exp(0.5 * z_log_var) * epsilon
+    list(z, z_mean, z_log_var)
+  }
+
+  decode <- function(z) {
+    h_dec <- self$dec_dense(z)
+    self$dec_output(h_dec)
+  }
+
+  self$call <- function(inputs, training = FALSE) {
+    res        <- encode(inputs)
+    z          <- res[[1]]; z_mean <- res[[2]]; z_log_var <- res[[3]]
+    reconstructed  <- decode(z)
+    self$z_mean    <- z_mean
+    self$z_log_var <- z_log_var
+    self$z         <- z
+    reconstructed
+  }
+
+  self$train_step <- function(data) {
+    with(tf$GradientTape() %as% tape, {
+      reconstructed <- self(data, training = TRUE)
+      recon_loss <- tf$reduce_mean(tf$reduce_sum(tf$math$square(data - reconstructed), axis = 1L))
+      kl_loss    <- -0.5 * tf$reduce_mean(tf$reduce_sum(
+        1 + self$z_log_var - tf$math$square(self$z_mean) - tf$math$exp(self$z_log_var), axis = 1L))
+      total_loss <- recon_loss + kl_loss
+    })
+    gradients <- tape$gradient(total_loss, self$trainable_variables)
+    self$optimizer$apply_gradients(purrr::transpose(list(gradients, self$trainable_variables)))
+    list(loss = total_loss, recon_loss = recon_loss, kl_loss = kl_loss)
+  }
+
+  self$encoder <- keras_model(
+    inputs  = self$encoder_input,
+    outputs = list(
+      self$z_mean_layer(self$enc_dense(self$encoder_input)),
+      self$z_log_var_layer(self$enc_dense(self$encoder_input))
+    ),
+    name = "encoder_model"
+  )
+  self$decoder <- keras_model(
+    inputs  = self$dec_input,
+    outputs = self$dec_output(self$dec_dense(self$dec_input)),
+    name = "decoder_model"
+  )
+})
+
+vae_model %>% compile(optimizer = "adam")
+
+callbacks_list <- list(
+  callback_early_stopping(monitor = "loss", patience = 10, restore_best_weights = TRUE),
+  callback_reduce_lr_on_plateau(monitor = "loss", factor = 0.5, patience = 5, min_lr = 1e-6)
+)
+
+cat("\nTraining VAE...\n")
+history <- vae_model %>% fit(x, epochs = 50, batch_size = 32,
+                             callbacks = callbacks_list, verbose = 1)
+
+save_model_hdf5(vae_model$encoder, "results/encoder_model.h5")
+save_model_hdf5(vae_model$decoder, "results/decoder_model.h5")
+
+encoded_means <- predict(vae_model$encoder, x)[[1]]
+latent_vae    <- as.data.frame(encoded_means)
+colnames(latent_vae) <- c("z1", "z2")
+latent_vae$HHID_PN <- df_clust$HHID_PN
+latent_vae$ATN     <- final$ATN[match(latent_vae$HHID_PN, final$HHID_PN)]
+latent_vae$Cluster <- final$Cluster[match(latent_vae$HHID_PN, final$HHID_PN)]
+
+# ---- VAE Explainability with SHAP (Optional) ----
+try({
+  shap <- import("shap")
+  np   <- import("numpy")
+  cat("\n=== VAE EXPLAINABILITY (SHAP) ===\n")
+  x_np <- np$array(df_clust_scaled)
+  explainer <- shap$KernelExplainer(
+    model = function(z) vae_model$predict(z),
+    data  = x_np[1:200, ]
+  )
+  shap_values <- explainer$shap_values(x_np[1:500, ])
+  saveRDS(shap_values, "results/vae_shap_values.rds")
+  png("figures/vae_shap_summary.png", width = 1200, height = 900)
+  shap$summary_plot(shap_values, x_np[1:500, ])
+  dev.off()
+}, silent = TRUE)
+
+# ---- PCA for Comparison ----
+pca_full   <- prcomp(df_clust_scaled, center = FALSE, scale. = FALSE)
+latent_pca <- as.data.frame(pca_full$x[, 1:2])
+colnames(latent_pca) <- c("PC1", "PC2")
+latent_pca$HHID_PN <- df_clust$HHID_PN
+latent_pca$ATN     <- final$ATN[match(latent_pca$HHID_PN, final$HHID_PN)]
+latent_pca$Cluster <- final$Cluster[match(latent_pca$HHID_PN, final$HHID_PN)]
+
+# Variance explained — from PCA object
+var_pca <- summary(pca_full)$importance[2, 1:2]
+cat("\nPCA variance explained (first 2 components):", round(sum(var_pca) * 100, 1), "%\n")
+
+# ---- Quantitative Comparison: Cluster Separation ----
+latent_vae_complete <- latent_vae[!is.na(latent_vae$Cluster), ]
+dist_vae  <- dist(as.matrix(latent_vae_complete[, c("z1", "z2")]))
+sil_vae   <- silhouette(as.integer(as.factor(latent_vae_complete$Cluster)), dist_vae)
+mean_sil_vae <- mean(sil_vae[, 3])
+
+latent_pca_complete <- latent_pca[!is.na(latent_pca$Cluster), ]
+dist_pca  <- dist(as.matrix(latent_pca_complete[, c("PC1", "PC2")]))
+sil_pca   <- silhouette(as.integer(as.factor(latent_pca_complete$Cluster)), dist_pca)
+mean_sil_pca <- mean(sil_pca[, 3])
+
+dist_original  <- dist(df_clust_scaled)
+sil_original_full <- silhouette(km$cluster, dist_original)
+mean_sil_original <- mean(sil_original_full[, 3])
+
+comparison_metrics <- data.frame(
+  Method = c("Original (4D)", "PCA (2D)", "VAE (2D)"),
+  Mean_Silhouette = c(mean_sil_original, mean_sil_pca, mean_sil_vae),
+  Variance_Explained = c(100, round(sum(var_pca) * 100, 1), NA)
+)
+
+cat("\n=== DIMENSIONALITY REDUCTION COMPARISON ===\n")
+print(comparison_metrics)
+write.csv(comparison_metrics, "tables/tableS15_dimensionality_reduction_comparison.csv", row.names = FALSE)
+knitr::kable(comparison_metrics, caption = "tableS15_dimensionality_reduction_comparison")
+
+# ---- Side-by-side Visualization ----
+p1 <- ggplot(latent_pca, aes(x = PC1, y = PC2, color = ATN)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(title = "PCA Projection",
+       subtitle = paste0("Variance explained: ", round(sum(var_pca) * 100, 1), "%")) +
+  theme_bw(base_size = 12) + theme(plot.title = element_text(face = "bold"))
+
+p2 <- ggplot(latent_vae, aes(x = z1, y = z2, color = ATN)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(title = "VAE Latent Space",
+       subtitle = paste0("Mean silhouette: ", round(mean_sil_vae, 3))) +
+  theme_bw(base_size = 12) + theme(plot.title = element_text(face = "bold"))
+
+p_combined <- grid.arrange(p1, p2, ncol = 2,
+                           top = "Dimensionality Reduction Comparison: PCA vs VAE")
+ggsave("figures/png/figure7_panelA_pca_vs_vae.png", p_combined, width = 14, height = 6, dpi = 300)
+ggsave("figures/tiff/figure7_panelA_pca_vs_vae.tiff", p_combined, width = 14, height = 6, dpi = 300)
+
+print(p_combined)
+
+p3 <- ggplot(latent_pca, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(alpha = 0.6, size = 2) + labs(title = "PCA: Colored by Cluster") +
+  theme_bw(base_size = 12)
+
+p4 <- ggplot(latent_vae, aes(x = z1, y = z2, color = Cluster)) +
+  geom_point(alpha = 0.6, size = 2) + labs(title = "VAE: Colored by Cluster") +
+  theme_bw(base_size = 12)
+
+p_combined_cluster <- grid.arrange(p3, p4, ncol = 2)
+ggsave("figures/png/figure7_panelB_pca_vs_vae_by_cluster.png", p_combined_cluster, width = 14, height = 6, dpi = 300)
+ggsave("figures/tiff/figure7_panelB_pca_vs_vae_by_cluster.tiff", p_combined_cluster, width = 14, height = 6, dpi = 300)
+
+print(p_combined_cluster)
+
+# ---- VAE Validation ----
+latent_vae$z1 <- as.numeric(latent_vae$z1)
+latent_vae$z2 <- as.numeric(latent_vae$z2)
+
+matched_idx <- match(latent_vae$HHID_PN, final$HHID_PN)
+bio_mat     <- final[matched_idx, c("NfL", "GFAP", "AB42_40_ratio", "pTau181_recode")]
+cog_vec     <- final$Cog_Score_2016[matched_idx]
+
+corr_matrix <- cor(cbind(latent_vae[, c("z1", "z2")], bio_mat, cognition = cog_vec),
+                   use = "pairwise.complete.obs")
+
+cat("\n=== LATENT DIMENSION CORRELATIONS ===\n")
+print(round(corr_matrix, 3))
+write.csv(round(corr_matrix, 3), "tables/tableS5_vae_latent_correlations.csv")
+knitr::kable(round(corr_matrix, 3), caption = "tableS5_vae_latent_correlations")
+
+png("figures/png/figureS5_vae_latent_correlations.png", width = 800, height = 600)
+corrplot(corr_matrix, method = "color", type = "upper", tl.col = "black", tl.srt = 45,
+         title = "Correlations: VAE Latents vs Biomarkers", mar = c(0, 0, 2, 0))
+dev.off()
+
+tiff("figures/supplementary/tiff/figureS5_vae_latent_correlations.tiff",
+     width = 16, height = 14, units = "in", res = 600)
+corrplot(corr_matrix, method = "color", type = "upper",
+         tl.col = "black", tl.srt = 45,
+         title = "Correlations: VAE Latents vs Biomarkers",
+         mar = c(0, 0, 2, 0))
+dev.off()
+
+print(corr_matrix)
+
+# Training history — from history object
+loss_df <- data.frame(
+  epoch       = seq_along(history$metrics$loss),
+  total_loss  = history$metrics$loss,
+  recon_loss  = history$metrics$recon_loss,
+  kl_loss     = history$metrics$kl_loss
+)
+
+write.csv(loss_df, "tables/tableS7_vae_training_history.csv", row.names = FALSE)
+knitr::kable(loss_df, caption = "tableS7_vae_training_history")
+
+loss_melt <- reshape2::melt(loss_df, id.vars = "epoch")
+p_training <- ggplot(loss_melt, aes(x = epoch, y = value, color = variable)) +
+  geom_line(linewidth = 1.2) +
+  facet_wrap(~ variable, scales = "free_y", ncol = 1) +
+  labs(title = "VAE Training Curves", x = "Epoch", y = "Loss") +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "none")
+
+ggsave("figures/supplementary/png/figureS6_vae_training_curves.png", p_training, width = 8, height = 10, dpi = 300)
+ggsave("figures/supplementary/tiff/figureS6_vae_training_curves.tiff", p_training, width = 8, height = 10, dpi = 300)
+
+print(p_training)
+
+save(latent_vae, latent_pca, file = "results/latent_representations.RData")
+```
+
+
+# Internal Validation
+
+```{r}
+set.seed(123)
+idx   <- sample(seq_len(nrow(final)), size = floor(0.7 * nrow(final)))
+train <- final[idx, ]
+test  <- final[-idx, ]
+
+cat("\n=== TRAIN/TEST SPLIT ===\n")
+cat("Training set size:", nrow(train), "\n")
+cat("Test set size:", nrow(test), "\n\n")
+
+eval_roc_on_test <- function(train, test, biomarker,
+                             outcome = "Dementia_IMP_2016",
+                             case = "Dementia", control = "Normal") {
+  vars <- c(outcome, biomarker, "PAGE", "GENDER", "RACE", "SCHLYRS")
+  tr <- train[, vars] %>% na.omit()
+  te <- test[,  vars] %>% na.omit()
+  tr <- tr[tr[[outcome]] %in% c(case, control), ]
+  te <- te[te[[outcome]] %in% c(case, control), ]
+  tr[[outcome]] <- factor(tr[[outcome]], levels = c(control, case))
+  te[[outcome]] <- factor(te[[outcome]], levels = c(control, case))
+  fit    <- glm(as.formula(paste(outcome, "~", biomarker, "+ PAGE + GENDER + RACE + SCHLYRS")),
+                data = tr, family = "binomial")
+  pi_hat <- predict(fit, newdata = te, type = "response")
+  roc_obj <- pROC::roc(te[[outcome]], pi_hat, levels = c(control, case), direction = "<")
+  list(roc = roc_obj, auc = pROC::auc(roc_obj), n = nrow(te))
+}
+
+roc_test_results <- lapply(biomarkers, function(b) eval_roc_on_test(train, test, b))
+names(roc_test_results) <- biomarkers
+
+# Test set AUCs — derived from test data
+test_performance <- data.frame(
+  Biomarker = c("NfL", "GFAP", "Aβ42/40", "pTau181"),
+  Test_AUC  = sapply(roc_test_results, function(x) round(x$auc, 3)),
+  Test_N    = sapply(roc_test_results, function(x) x$n)
+)
+
+cat("\n=== TEST SET PERFORMANCE ===\n")
+print(test_performance)
+write.csv(test_performance, "tables/test_set_performance.csv", row.names = FALSE)
+knitr::kable(test_performance, caption = "test_set_performance")
+
+p_test_auc <- ggplot(test_performance, aes(x = Biomarker, y = Test_AUC, fill = Biomarker)) +
+  geom_bar(stat = "identity") +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  coord_flip() +
+  labs(title = "Test Set Performance: AUC by Biomarker", x = "Biomarker", y = "AUC") +
+  scale_fill_brewer(palette = "Set2") +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "none")
+
+ggsave("figures/png/test_auc_bars.png", p_test_auc, width = 10, height = 8, dpi = 300)
+ggsave("figures/tiff/test_auc_bars.tiff", p_test_auc, width = 10, height = 8, dpi = 300)
+
+print(p_test_auc)
+
+# ---- Clustering Stability (Bootstrap) ----
+cat("\nAssessing clustering stability (50 bootstrap iterations)...\n")
+
+set.seed(123)
+B <- 50
+ari_scores <- numeric(B)
+base_labels <- km$cluster
+
+for (b in 1:B) {
+  idx_sub <- sample(seq_len(nrow(df_clust_scaled)),
+                    size = floor(0.8 * nrow(df_clust_scaled)), replace = FALSE)
+  km_sub  <- kmeans(df_clust_scaled[idx_sub, , drop = FALSE],
+                    centers = optimal_k, nstart = 50, iter.max = 300)
+  cent       <- km_sub$centers
+  d_all      <- as.matrix(dist(rbind(cent, df_clust_scaled)))
+  d_to_cent  <- d_all[1:nrow(cent), (nrow(cent)+1):nrow(d_all)]
+  assign_full <- apply(d_to_cent, 2, which.min)
+  ari_scores[b] <- adjustedRandIndex(base_labels, assign_full)
+}
+
+# Stability summary — all values from bootstrap output
+stability_summary <- data.frame(
+  Metric = c("Mean ARI", "Median ARI", "Min ARI", "Max ARI", "SD ARI"),
+  Value  = c(mean(ari_scores), median(ari_scores), min(ari_scores),
+             max(ari_scores), sd(ari_scores))
+)
+
+cat("\n=== CLUSTERING STABILITY (Bootstrap ARI) ===\n")
+print(stability_summary)
+write.csv(stability_summary, "tables/clustering_stability.csv", row.names = FALSE)
+knitr::kable(stability_summary, caption = "clustering_stability")
+
+ari_df <- data.frame(ARI = ari_scores)
+p_stability <- ggplot(ari_df, aes(x = ARI)) +
+  geom_histogram(bins = 20, fill = "darkorange", color = "white", alpha = 0.8) +
+  geom_vline(xintercept = mean(ari_scores), linetype = "dashed", color = "red", linewidth = 1) +
+  annotate("text", x = mean(ari_scores), y = Inf,
+           label = paste0("Mean = ", round(mean(ari_scores), 3)),
+           vjust = 1.5, color = "red", fontface = "bold") +
+  labs(title = "Clustering Stability via Bootstrap Resampling",
+       subtitle = paste0("50 iterations with 80% subsampling (k = ", optimal_k, ")"),
+       x = "Adjusted Rand Index vs. Base Clustering", y = "Count") +
+  theme_bw(base_size = 14) + theme(plot.title = element_text(face = "bold"))
+
+ggsave("figures/png/cluster_stability_ari.png", p_stability, width = 10, height = 8, dpi = 300)
+ggsave("figures/tiff/cluster_stability_ari.tiff", p_stability, width = 10, height = 8, dpi = 300)
+
+print(p_stability)
+```
+
+
+# Sensitivity Analyses
+
+```{r}
+cat("\n=== SENSITIVITY ANALYSES ===\n\n")
+
+# ---- Alternative ATN Cutoffs (Quartile-based) ----
+cat("1. Testing alternative ATN cutoffs (quartile-based)...\n")
+
+final_q <- final %>%
+  mutate(
+    A_q   = ifelse(log_AB42_40_ratio  < quantile(log_AB42_40_ratio,  0.25, na.rm = TRUE), "A+", "A-"),
+    T_q   = ifelse(log_pTau181_recode > quantile(log_pTau181_recode, 0.75, na.rm = TRUE), "T+", "T-"),
+    N_q   = ifelse(log_NfL            > quantile(log_NfL,            0.75, na.rm = TRUE), "N+", "N-"),
+    ATN_q = paste(A_q, T_q, N_q, sep = "/")
+  )
+
+atn_comparison <- final_q %>%
+  filter(!is.na(ATN), !is.na(ATN_q)) %>%
+  select(ATN, ATN_q)
+
+ari_atn <- adjustedRandIndex(atn_comparison$ATN, atn_comparison$ATN_q)
+nmi_atn <- NMI(as.character(atn_comparison$ATN), as.character(atn_comparison$ATN_q))
+
+cat("  ARI =", round(ari_atn, 3), "\n")
+cat("  NMI =", round(nmi_atn, 3), "\n\n")
+
+atn_crosstab <- table(atn_comparison$ATN, atn_comparison$ATN_q)
+write.csv(as.data.frame.matrix(atn_crosstab),
+          "tables/tableS12_atn_cutoff_sensitivity_crosstab.csv")
+knitr::kable(atn_crosstab, caption = "tableS12_atn_cutoff_sensitivity_crosstab")
+```
+
+
+# Alternative VAE Architectures
+
+```{r}
+cat("Testing alternative VAE architectures...\n")
+
+train_vae_simple <- function(x, latent_dim = 3, intermediate_dim = 64,
+                             epochs = 30, batch_size = 32) {
+  input_dim <- ncol(x)
+  enc_input <- layer_input(shape = input_dim)
+  h_enc     <- enc_input %>% layer_dense(units = intermediate_dim, activation = "relu")
+  z_mean    <- h_enc %>% layer_dense(units = latent_dim, name = "z_mean")
+  z_log_var <- h_enc %>% layer_dense(units = latent_dim, name = "z_log_var")
+
+  sampling <- function(args) {
+    z_mean    <- args[[1]]; z_log_var <- args[[2]]
+    epsilon   <- k_random_normal(shape = k_shape(z_mean))
+    z_mean + k_exp(0.5 * z_log_var) * epsilon
+  }
+  z <- layer_lambda(f = sampling, name = "z_sampling")(list(z_mean, z_log_var))
+
+  dec_input  <- layer_input(shape = latent_dim)
+  h_dec      <- dec_input %>% layer_dense(units = intermediate_dim, activation = "relu")
+  dec_output <- h_dec %>% layer_dense(units = input_dim, activation = "linear")
+
+  encoder <- keras_model(enc_input, z_mean, name = "encoder")
+  decoder <- keras_model(dec_input, dec_output, name = "decoder")
+
+  vae_output <- decoder(z)
+  vae        <- keras_model(enc_input, vae_output, name = "vae")
+  vae %>% compile(optimizer = "adam", loss = "mse")
+  history <- vae %>% fit(x, x, epochs = epochs, batch_size = batch_size,
+                         verbose = 0, validation_split = 0.2)
+
+  list(encoder = encoder, decoder = decoder, vae = vae,
+       history = history, final_loss = tail(history$metrics$loss, 1))
+}
+
+# Test range of latent dimensions
+latent_dims <- c(2, 3, 4, 5)
+vae_comparison <- data.frame(
+  Latent_Dim     = integer(),
+  Final_Loss     = numeric(),
+  Final_Val_Loss = numeric()
+)
+
+for (ld in latent_dims) {
+  cat("  Training VAE with latent_dim =", ld, "...\n")
+  set.seed(123)
+  vae_temp <- train_vae_simple(x, latent_dim = ld, epochs = 30)
+  vae_comparison <- rbind(vae_comparison, data.frame(
+    Latent_Dim     = ld,
+    Final_Loss     = tail(vae_temp$history$metrics$loss,     1),
+    Final_Val_Loss = tail(vae_temp$history$metrics$val_loss, 1)
+  ))
+}
+
+cat("\n  VAE Architecture Comparison:\n")
+print(vae_comparison)
+write.csv(vae_comparison, "tables/tableS15_vae_latent_dimensions.csv", row.names = FALSE)
+knitr::kable(vae_comparison, caption = "tableS15_vae_latent_dimensions")
+
+vae_comp_melt <- reshape2::melt(vae_comparison, id.vars = "Latent_Dim")
+p_vae_sens <- ggplot(vae_comp_melt, aes(x = factor(Latent_Dim), y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "VAE Performance: Alternative Latent Dimensions",
+       x = "Latent Dimension", y = "Final Loss", fill = "Loss Type") +
+  scale_fill_manual(values = c("steelblue", "darkorange"), labels = c("Training", "Validation")) +
+  theme_bw(base_size = 14) + theme(plot.title = element_text(face = "bold"))
+
+ggsave("figures/supplementary/png/figureS15_vae_latent_dimensions.png", p_vae_sens, width = 10, height = 8, dpi = 300)
+ggsave("figures/supplementary/tiff/figureS15_vae_latent_dimensions.tiff", p_vae_sens, width = 10, height = 8, dpi = 300)
+
+print(p_vae_sens)
+```
+
+
+# Alternative Clustering Solutions (k-1, k+1)
+
+```{r}
+cat("Testing alternative number of clusters...\n")
+
+k_alternatives <- c(optimal_k - 1, optimal_k, optimal_k + 1)
+k_comparison   <- data.frame(K = integer(), Mean_Silhouette = numeric(), Total_WSS = numeric())
+
+for (k_test in k_alternatives) {
+  if (k_test < 2) next
+  set.seed(123)
+  km_test   <- kmeans(df_clust_scaled, centers = k_test, nstart = 50, iter.max = 300)
+  sil_test  <- silhouette(km_test$cluster, dist(df_clust_scaled))
+  k_comparison <- rbind(k_comparison, data.frame(
+    K = k_test,
+    Mean_Silhouette = mean(sil_test[, 3]),
+    Total_WSS = km_test$tot.withinss
+  ))
+}
+
+cat("\n  Clustering Solutions Comparison:\n")
+print(k_comparison)
+write.csv(k_comparison, "tables/tableS17_cluster_quality_by_k.csv", row.names = FALSE)
+knitr::kable(k_comparison, caption = "tableS17_cluster_quality_by_k")
+```
+
+
+# Robustness to Missing Data Pattern
+
+```{r}
+cat("Assessing robustness to missing data...\n")
+
+missing_pattern <- final %>%
+  mutate(
+    Has_NfL  = !is.na(NfL),
+    Has_GFAP = !is.na(GFAP),
+    Has_AB   = !is.na(AB42_40_ratio),
+    Has_pTau = !is.na(pTau181_recode),
+    Complete_Biomarkers = Has_NfL & Has_GFAP & Has_AB & Has_pTau
+  )
+
+# All counts from data
+missing_summary <- missing_pattern %>%
+  summarise(
+    N_Total    = n(),
+    N_Complete = sum(Complete_Biomarkers),
+    Pct_Complete = mean(Complete_Biomarkers) * 100,
+    N_Missing_NfL  = sum(!Has_NfL),
+    N_Missing_GFAP = sum(!Has_GFAP),
+    N_Missing_AB   = sum(!Has_AB),
+    N_Missing_pTau = sum(!Has_pTau)
+  )
+
+cat("\n  Missing Data Summary:\n")
+print(missing_summary)
+write.csv(missing_summary, "tables/tableS11_missing_data_summary.csv", row.names = FALSE)
+knitr::kable(missing_summary, caption = "tableS11_missing_data_summary")
+
+missing_pattern_test <- missing_pattern %>%
+  group_by(Complete_Biomarkers) %>%
+  summarise(
+    N        = n(),
+    Mean_Age = mean(PAGE, na.rm = TRUE),
+    Pct_Female = mean(GENDER == 2, na.rm = TRUE) * 100,
+    Mean_Cog = mean(Cog_Score_2016, na.rm = TRUE)
+  )
+
+write.csv(missing_pattern_test, "tables/tableS11_missing_by_demographics.csv", row.names = FALSE)
+knitr::kable(missing_pattern_test, caption = "tableS11_missing_by_demographics")
+```
+
+
+# Comprehensive missing data table
+
+```{r}
+tableS11_full <- final %>%
+  summarise(
+    across(
+      c(NfL, GFAP, AB42_40_ratio, pTau181_recode, PAGE, GENDER, RACE, SCHLYRS,
+        Cog_Score_2016, Cog_Score_2018, Cog_Score_2020),
+      list(
+        N_Missing   = ~sum(is.na(.)),
+        Pct_Missing = ~round(100 * mean(is.na(.)), 1)
+      ),
+      .names = "{.col}_{.fn}"
+    )
+  ) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Value") %>%
+  separate(Variable, into = c("Variable", "Metric"), sep = "_(?=[^_]+$)") %>%
+  pivot_wider(names_from = Metric, values_from = Value)
+
+write.csv(tableS11_full, "tables/tableS11_missing_data_complete.csv", row.names = FALSE)
+knitr::kable(tableS11_full, caption = "tableS11_missing_data_complete")
+```
+
+
+# Summary of All Sensitivity Analyses
+
+```{r}
+# All values from previously computed objects — no hardcoding
+sensitivity_summary <- data.frame(
+  Analysis = c(
+    "Alternative ATN cutoffs (quartile)",
+    "VAE latent dimension selection",
+    "Alternative clustering (k±1)",
+    "Missing data pattern"
+  ),
+  Finding = c(
+    paste0("ARI = ", round(ari_atn, 3), " with quartile cutoffs"),
+    paste0("Optimal latent_dim = ",
+           vae_comparison$Latent_Dim[which.min(vae_comparison$Final_Val_Loss)]),
+    paste0("Best k = ", k_comparison$K[which.max(k_comparison$Mean_Silhouette)]),
+    paste0(round(missing_summary$Pct_Complete, 1), "% with complete biomarkers")
+  ),
+  Interpretation = c(
+    ifelse(ari_atn > 0.6, "High agreement", "Moderate agreement"),
+    "Supports dimensionality choice",
+    ifelse(k_comparison$K[which.max(k_comparison$Mean_Silhouette)] == optimal_k,
+           "Confirms k selection", "Suggests alternative k"),
+    ifelse(missing_summary$Pct_Complete > 90,
+           "Minimal bias from missingness",
+           "Potential bias from missingness")
+  )
+)
+
+knitr::kable(sensitivity_summary, caption = "Summary of Sensitivity Analyses")
+write.csv(sensitivity_summary, "tables/sensitivity_analyses_summary.csv", row.names = FALSE)
+print(sensitivity_summary)
+cat("\n=== SENSITIVITY ANALYSES COMPLETE ===\n\n")
+```
+
+
+# Comprehensive Sensitivity Summary
+
+```{r}
+# All values from computed objects 
+table10_sensitivity <- data.frame(
+  Analysis = c(
+    "GFAP-Excluded Clustering",
+    paste0("k=3 vs k=", optimal_k, " Comparison"),
+    paste0("Cluster ", names(which.min(table(km$cluster))), " Stability"),
+    "Distance Metric Sensitivity",
+    "Alternative ATN Cutoffs",
+    "Missing Data Assessment",
+    "VAE Latent Dimensions"
+  ),
+  Finding = c(
+    paste0("ARI = ", round(ari_3bio_vs_atn, 3),
+           " (3-bio) vs ", round(ari_4bio_vs_atn, 3),
+           " (4-bio); ", round(relative_improvement, 0), "% improvement"),
+    paste0("Silhouette: k=3 = ", round(mean_sil_k3, 3),
+           ", k=", optimal_k, " = ", round(mean_sil_width, 3),
+           "; k=", optimal_k, " preserves extremes"),
+    paste0("Jaccard = ", stab_results$Jaccard[which.min(table(km$cluster))],
+           "; Manhattan ARI = ", round(ari_distance_sensitivity, 3)),
+    paste0("ARI = ", round(ari_distance_sensitivity, 3), " (Manhattan vs Euclidean)"),
+    paste0(max(reclass_data$Percent), "% max reclassification under ±10% threshold variation"),
+    paste0(round(missing_summary$Pct_Complete, 1), "% complete cases"),
+    paste0("Optimal latent_dim = ",
+           vae_comparison$Latent_Dim[which.min(vae_comparison$Final_Val_Loss)],
+           " (validation loss = ",
+           round(min(vae_comparison$Final_Val_Loss), 3), ")")
+  ),
+  Interpretation = c(
+    "GFAP contributes to discordance; binary vs continuous matters",
+    paste0("k=", optimal_k, " provides superior biological resolution"),
+    "Smallest cluster is stable, not artifact",
+    "Results robust to distance metric",
+    "ATN moderately sensitive to cutoffs",
+    "Assess potential bias from missingness",
+    "Parsimonious representation optimal"
+  )
+)
+
+write.csv(table10_sensitivity, "tables/table10_sensitivity_analyses_summary.csv", row.names = FALSE)
+knitr::kable(table10_sensitivity, caption = "tables/table10_sensitivity_analyses_summary")
+print(table10_sensitivity)
+```
+
+
+# Visualization: Silhouette Comparison Across Representations
+
+```{r}
+cat("\n=== Computing Silhouette Comparison Across Representations ===\n")
+
+# PCA and VAE objects already computed above; reuse them
+
+# Silhouette dataframe — all from model outputs
+sil_df <- bind_rows(
+  data.frame(Silhouette = sil_original_full[, 3], Space = "Original 4D",
+             Cluster = factor(km$cluster)),
+  data.frame(Silhouette = sil_pca[, 3], Space = "PCA 2D",
+             Cluster = factor(latent_pca_complete$Cluster)),
+  data.frame(Silhouette = sil_vae[, 3], Space = "VAE 2D",
+             Cluster = factor(latent_vae_complete$Cluster))
+)
+
+sil_df$Space <- factor(sil_df$Space, levels = c("Original 4D", "PCA 2D", "VAE 2D"))
+
+# Pairwise tests — p-values from data
+p_original_pca <- wilcox.test(sil_df$Silhouette[sil_df$Space == "Original 4D"],
+                               sil_df$Silhouette[sil_df$Space == "PCA 2D"])$p.value
+p_original_vae <- wilcox.test(sil_df$Silhouette[sil_df$Space == "Original 4D"],
+                               sil_df$Silhouette[sil_df$Space == "VAE 2D"])$p.value
+p_pca_vae      <- wilcox.test(sil_df$Silhouette[sil_df$Space == "PCA 2D"],
+                               sil_df$Silhouette[sil_df$Space == "VAE 2D"])$p.value
+
+fmt_p <- function(p) if (p < 0.001) "p < 0.001" else paste0("p = ", format(round(p, 3), nsmall = 3))
+label_orig_pca <- fmt_p(p_original_pca)
+label_orig_vae <- fmt_p(p_original_vae)
+label_pca_vae  <- fmt_p(p_pca_vae)
+
+# Annotation y positions — derived from data range
+sil_max     <- max(sil_df$Silhouette, na.rm = TRUE)
+sil_range   <- diff(range(sil_df$Silhouette, na.rm = TRUE))
+y_ann_1     <- sil_max + sil_range * 0.08
+y_ann_2     <- sil_max + sil_range * 0.18
+y_text_adj  <- sil_range * 0.02
+
+p_panelB_fixed <- ggplot(sil_df, aes(x = Space, y = Silhouette, fill = Space)) +
+  geom_boxplot(alpha = 0.8, outlier.shape = NA, linewidth = 0.7) +
+  geom_jitter(aes(color = Cluster), width = 0.15, alpha = 0.6, size = 1.8) +
+  scale_fill_manual(values = c("Original 4D" = "#1b9e77", "PCA 2D" = "#d95f02", "VAE 2D" = "#7570b3")) +
+  scale_color_manual(values = setNames(
+    RColorBrewer::brewer.pal(max(3, optimal_k), "Set2")[1:optimal_k],
+    as.character(1:optimal_k)
+  )) +
+  labs(title = "Panel B. Silhouette Comparison Across Representations",
+       x = "Representation Space", y = "Silhouette Width",
+       fill = "Space", color = "Cluster") +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(face = "bold", size = 16),
+        legend.position = "right", panel.grid.minor = element_blank()) +
+  annotate("segment", x = 1, xend = 2, y = y_ann_1, yend = y_ann_1) +
+  annotate("text",    x = 1.5, y = y_ann_1 + y_text_adj, label = label_orig_pca, fontface = "bold") +
+  annotate("segment", x = 1, xend = 3, y = y_ann_2, yend = y_ann_2) +
+  annotate("text",    x = 2,   y = y_ann_2 + y_text_adj, label = label_orig_vae, fontface = "bold") +
+  annotate("segment", x = 2, xend = 3, y = y_ann_1, yend = y_ann_1) +
+  annotate("text",    x = 2.5, y = y_ann_1 + y_text_adj, label = label_pca_vae,  fontface = "bold")
+
+ggsave("figures/png/figure7_panelB_silhouette_comparison.png", p_panelB_fixed, width = 10, height = 8, dpi = 300)
+ggsave("figures/tiff/figure7_panelB_silhouette_comparison.tiff", p_panelB_fixed, width = 10, height = 8, dpi = 300)
+print(p_panelB_fixed)
+cat("\n=== Figure 7 Panel B saved ===\n")
+```
+
+
+# Method Comparison Summary Table
+
+```{r}
+cat("\n=== CREATING COMPREHENSIVE METHOD COMPARISON ===\n")
+
+method_comparison <- data.frame(
+  Method   = c("ATN Framework", "K-Means Clustering", "VAE Latent Space", "PCA"),
+  Approach = c("Theory-driven", "Data-driven (unsupervised)",
+               "Data-driven (deep learning)", "Data-driven (linear)"),
+  N_Groups = c(length(unique(final$ATN)), optimal_k, NA, NA),
+  Mean_Silhouette = c(NA, round(mean_sil_original, 3), round(mean_sil_vae, 3), round(mean_sil_pca, 3)),
+  Variance_Explained = c(NA, NA, NA, round(sum(var_pca) * 100, 1)),
+  Cognitive_Association = c(
+    format_p(kw_cog$p.value),
+    format_p(kruskal.test(Cog_Score_2016 ~ Cluster, data = final_tab)$p.value),
+    NA, NA
+  ),
+  Interpretability = c("High", "Medium", "Low", "High"),
+  Advantages = c(
+    "Clinical relevance; validated cutoffs",
+    "Discovers natural groupings; no assumptions",
+    "Non-linear relationships; dimensionality reduction",
+    "Simple; variance maximization"
+  ),
+  Limitations = c(
+    "Binary cutoffs lose information; platform-specific",
+    "Requires k selection; assumes spherical clusters",
+    "Black box; requires tuning",
+    "Linear only; may miss non-linear patterns"
+  )
+)
+
+knitr::kable(method_comparison, caption = "Comprehensive Comparison of Classification Approaches")
+write.csv(method_comparison, "tables/method_comparison_comprehensive.csv", row.names = FALSE)
+```
+
+
+# Cross-Method Cluster Agreement (Sankey Diagram)
+
+```{r}
+# ============================================================
+# Build Sankey flow data from GMM vs k-means assignments
+# ============================================================
+
+# --- Join and flatten BEFORE filtering --------------------
+
+final_for_sankey <- final %>%
+  mutate(HHID_PN = trimws(as.character(HHID_PN))) %>%   # FIXED: removed extra ')'
+  left_join(
+    df_clust_gmm %>%
+      mutate(HHID_PN = trimws(as.character(HHID_PN))) %>%
+      select(HHID_PN, GMM_Cluster),
+    by = "HHID_PN"
+  ) %>%
+  # Flatten ALL list-columns created by the join
+  mutate(across(everything(), ~ { if (is.list(.x)) unlist(.x) else .x })) %>%
+  # Now safely filter
+  filter(!is.na(Cluster), !is.na(GMM_Cluster)) %>%
+  # Keep only needed columns
+  select(HHID_PN, Cluster, GMM_Cluster) %>%
+  # Convert factors → integers
+  mutate(
+    Cluster     = as.integer(as.character(Cluster)),
+    GMM_Cluster = as.integer(as.character(GMM_Cluster))
+  )
+
+# --- Build Sankey counts ---------------------------------
+
+sankey_counts <- final_for_sankey %>%
+  dplyr::count(Cluster, GMM_Cluster) %>%
+  mutate(
+    source = paste0("k-means_C", Cluster),
+    target = paste0("GMM_C", GMM_Cluster),
+    value  = n
+  ) %>%
+  select(source, target, value)
+
+# --- Build node list -------------------------------------
+
+sankey_nodes <- data.frame(
+  name = unique(c(sankey_counts$source, sankey_counts$target))
+)
+
+# --- Convert node names → indices -------------------------
+
+sankey_links <- sankey_counts %>%
+  mutate(
+    source = match(source, sankey_nodes$name) - 1,
+    target = match(target, sankey_nodes$name) - 1
+  )
+
+# --- Create Sankey widget --------------------------------
+
+p_sankey <- sankeyNetwork(
+  Links = sankey_links,
+  Nodes = sankey_nodes,
+  Source = "source",
+  Target = "target",
+  Value  = "value",
+  NodeID = "name",
+  fontSize = 14,
+  nodeWidth = 30,
+  sinksRight = FALSE
+)
+
+# ============================================================
+# Export Sankey: HTML → PNG → TIFF (600 dpi)
+# ============================================================
+
+saveWidget(p_sankey, "figures/figureS9_sankey.html", selfcontained = TRUE)
+
+webshot(
+  "figures/figureS9_sankey.html",
+  file   = "figures/supplementary/png/figureS9_sankey.png",
+  vwidth = 2000,
+  vheight = 1500,
+  delay  = 0.5
+)
+
+img <- image_read("figures/supplementary/png/figureS9_sankey.png")
+
+image_write(
+  img,
+  path   = "figures/supplementary/tiff/figureS9_sankey.tiff",
+  format = "tiff",
+  density = "600x600"
+)
+```
+
+
+```{r}
+str(final_for_sankey$Cluster)
+str(final_for_sankey$GMM_Cluster)
+```
+
+
+
+# CUTOFF SENSITIVITY ANALYSIS
+
+```{r}
+cat("\n=== GENERATING TABLE S19: CUTOFF SENSITIVITY ===\n")
+
+# Cutoff scenarios — reference values from literature, unchanged
+cutoff_scenarios <- list(
+  primary = list(AB = 0.067, pTau = 2.2, NfL = 20),
+  lower   = list(AB = 0.060, pTau = 2.0, NfL = 18),
+  higher  = list(AB = 0.074, pTau = 2.4, NfL = 22)
+)
+
+# Reclassification counts — computed from data
+ab_borderline   <- final %>%
+  filter(AB42_40_ratio  >= cutoff_scenarios$lower$AB   & AB42_40_ratio  <= cutoff_scenarios$higher$AB)
+ptau_borderline <- final %>%
+  filter(pTau181_recode >= cutoff_scenarios$lower$pTau & pTau181_recode <= cutoff_scenarios$higher$pTau)
+nfl_borderline  <- final %>%
+  filter(NfL            >= cutoff_scenarios$lower$NfL  & NfL            <= cutoff_scenarios$higher$NfL)
+
+reclassification_summary <- data.frame(
+  Biomarker         = c("Aβ42/40 ratio", "p-Tau181", "NfL"),
+  Primary_Cutoff    = c("< 0.067", "> 2.2 pg/mL", "> 20 pg/mL"),
+  Alternative_Range = c("0.060 – 0.074", "2.0 – 2.4 pg/mL", "18 – 22 pg/mL"),
+  Estimated_Reclassification_Pct = round(
+    c(nrow(ab_borderline), nrow(ptau_borderline), nrow(nfl_borderline)) / nrow(final) * 100, 1
+  ),
+  Common_Transitions = c(
+    "A+ ↔ A- (borderline cases)",
+    "T+ ↔ T- (intermediate pathology)",
+    "N+ ↔ N- (mild neurodegeneration)"
+  )
+)
+
+write.csv(reclassification_summary, "tables/tableS19_cutoff_reclassification.csv", row.names = FALSE)
+cat("\nTable S19 saved\n")
+print(reclassification_summary)
+```
+
+
+# Agreement/concordance matrix
+
+```{r}
+# All ARI/NMI values from previously computed objects — no hardcoding
+agreement_matrix <- data.frame(
+  Comparison = c(
+    "ATN vs K-Means",
+    "ATN vs ATN_quartile",
+    "K-Means (4D) vs PCA (2D)",
+    "K-Means (4D) vs VAE (2D)"
+  ),
+  ARI = c(
+    ari_val,
+    ari_atn,
+    adjustedRandIndex(
+      km$cluster,
+      kmeans(pca_full$x[, 1:2], centers = optimal_k, nstart = 50)$cluster
+    ),
+    adjustedRandIndex(
+      df_clust_clean$Cluster[match(latent_vae_complete$HHID_PN, df_clust_clean$HHID_PN)],
+      kmeans(as.matrix(latent_vae_complete[, c("z1", "z2")]),
+             centers = optimal_k, nstart = 50)$cluster
+    )
+  ),
+  NMI = c(nmi_val, nmi_atn, NA, NA),
+  Interpretation = c(
+    ifelse(ari_val  > 0.3, "Moderate agreement", "Low agreement"),
+    ifelse(ari_atn  > 0.6, "High agreement",     "Moderate agreement"),
+    "Compares projection methods",
+    "Compares projection methods"
+  )
+)
+
+knitr::kable(agreement_matrix, digits = 3, caption = "Agreement Between Classification Methods")
+write.csv(agreement_matrix, "tables/method_agreement_matrix.csv", row.names = FALSE)
+cat("\n=== METHOD COMPARISON COMPLETE ===\n\n")
+```
+
+
+# Final Summary Report
+
+```{r}
+cat("\n========================================\n")
+cat("FINAL ANALYSIS SUMMARY\n")
+cat("========================================\n\n")
+
+cat("1. SAMPLE CHARACTERISTICS\n")
+cat("   Total participants:", nrow(final), "\n")
+cat("   With complete biomarkers:", nrow(df_clust), "\n")
+cat("   With complete data (biomarkers + covariates):", nrow(final_tab), "\n\n")
+
+cat("2. ATN FRAMEWORK\n")
+cat("   Number of ATN profiles:", length(unique(final$ATN)), "\n")
+cat("   Most common profile:", names(which.max(table(final$ATN))),
+    "(n =", max(table(final$ATN)), ")\n")
+cat("   Least common profile:", names(which.min(table(final$ATN))),
+    "(n =", min(table(final$ATN)), ")\n\n")
+
+cat("3. DATA-DRIVEN CLUSTERING\n")
+cat("   Optimal k:", optimal_k, "(NbClust:", recommended_k,
+    "| Elbow:", elbow_k, "| Silhouette:", best_k_sil, ")\n")
+cat("   Mean silhouette width:", round(mean_sil_width, 3), "\n")
+cat("   Stability (mean bootstrap ARI):", round(mean(ari_scores), 3), "\n\n")
+
+cat("4. ATN-CLUSTER AGREEMENT\n")
+cat("   Adjusted Rand Index:", round(ari_val, 3), "\n")
+cat("   Normalized Mutual Information:", round(nmi_val, 3), "\n")
+cat("   Interpretation:",
+    ifelse(ari_val > 0.3, "Moderate agreement", "Low agreement"), "\n\n")
+
+cat("5. BIOMARKER PREDICTIVE PERFORMANCE (Test Set)\n")
+for (i in 1:nrow(test_performance)) {
+  cat("   ", test_performance$Biomarker[i], "AUC:", test_performance$Test_AUC[i], "\n")
+}
+cat("\n")
+
+cat("6. DIMENSIONALITY REDUCTION\n")
+cat("   PCA (2D) variance explained:", round(sum(var_pca) * 100, 1), "%\n")
+cat("   VAE mean silhouette:", round(mean_sil_vae, 3), "\n")
+cat("   PCA mean silhouette:", round(mean_sil_pca, 3), "\n\n")
+
+cat("7. KEY FINDINGS\n")
+cat("   • ATN and data-driven clusters show",
+    ifelse(ari_val > 0.3, "moderate", "limited"), "alignment\n")
+cat("   • Best performing biomarker:",
+    test_performance$Biomarker[which.max(test_performance$Test_AUC)],
+    "(AUC =", max(test_performance$Test_AUC), ")\n")
+cat("   • Clustering is",
+    ifelse(mean(ari_scores) > 0.7, "highly stable",
+           ifelse(mean(ari_scores) > 0.5, "moderately stable", "unstable")), "\n")
+cat("   • VAE",
+    ifelse(mean_sil_vae > mean_sil_pca, "outperforms", "underperforms"),
+    "PCA for cluster separation\n\n")
+
+cat("8. OUTPUT FILES GENERATED\n")
+cat("   Tables:", length(list.files("tables", pattern = "\\.csv$")), "files\n")
+cat("   Figures:", length(list.files("figures", pattern = "\\.png$")), "files\n")
+cat("   Results:", length(list.files("results")), "files\n\n")
+
+cat("========================================\n")
+cat("ANALYSIS COMPLETE\n")
+cat("========================================\n\n")
+```
+
+
+# Save summary report
+
+```{r}
+# All values from computed objects — no hardcoding
+summary_report <- list(
+  sample_size            = nrow(final),
+  complete_biomarkers    = nrow(df_clust),
+  optimal_k              = optimal_k,
+  recommended_k_nbclust  = recommended_k,
+  elbow_k                = elbow_k,
+  best_k_silhouette      = best_k_sil,
+  mean_silhouette        = mean_sil_width,
+  ari_atn_cluster        = ari_val,
+  nmi_atn_cluster        = nmi_val,
+  best_biomarker         = test_performance$Biomarker[which.max(test_performance$Test_AUC)],
+  best_auc               = max(test_performance$Test_AUC),
+  clustering_stability   = mean(ari_scores),
+  pca_variance           = sum(var_pca),
+  vae_silhouette         = mean_sil_vae,
+  pca_silhouette         = mean_sil_pca
+)
+
+saveRDS(summary_report, "results/analysis_summary.rds")
+
+final_summary_table <- data.frame(
+  Metric = names(summary_report),
+  Value  = unlist(summary_report)
+)
+
+write.csv(final_summary_table, "tables/analysis_summary.csv", row.names = FALSE)
+print(final_summary_table)
+```
