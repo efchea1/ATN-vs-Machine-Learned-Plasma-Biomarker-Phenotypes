@@ -1,5 +1,5 @@
 ---
-title: "Machine-Learned Plasma Biomarker Phenotypes"
+title: "ATN vs. Machine-Learned Plasma Biomarker Phenotypes"
 author: "Emmanuel Fle Chea, MPH"
 date: "`r Sys.Date()`"
 output: html_document
@@ -589,8 +589,6 @@ qq_grid <- (
     plot.subtitle = element_text(hjust = 0.5)
   )
 
-print(qq_grid)
-
 ggsave("figures/supplementary/png/figureS1_biomarker_qq_plots.png",
        qq_grid, width = 16, height = 14, dpi = 600)
 
@@ -1002,6 +1000,7 @@ for (b in biomarkers) {
 
 write.csv(hl_results, "tables/hosmer_lemeshow_results.csv", row.names = FALSE)
 knitr::kable(hl_results, caption = "HOSMER LEMESHOW GOODNESS OF FIT TEST")
+print(hl_results)
 ```
 
 
@@ -1689,6 +1688,8 @@ p <- ggplot(stab, aes(x = factor(Cluster), y = Jaccard, fill = factor(Cluster)))
 
 ggsave("figures/png/bootstrap_stability_jaccard.png", p, width = 10, height = 6, dpi = 300)
 ggsave("figures/tiff/bootstrap_stability_jaccard.tiff", p, width = 10, height = 6, dpi = 300)
+
+print(p)
 ```
 
 
@@ -3711,13 +3712,6 @@ image_write(
   density = "600x600"
 )
 ```
-
-
-```{r}
-str(final_for_sankey$Cluster)
-str(final_for_sankey$GMM_Cluster)
-```
-
 
 
 # CUTOFF SENSITIVITY ANALYSIS
